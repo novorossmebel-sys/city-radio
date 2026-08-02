@@ -1,0 +1,13 @@
+# окружение и секреты
+.venv/
+venv/
+.env
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# ос
+.DS_Store
