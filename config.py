@@ -9,6 +9,7 @@ load_dotenv()
 class Settings:
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
     OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "")
+    MAX_BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "")
 
 
 settings = Settings()
