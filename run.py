@@ -2,6 +2,9 @@
 
   python run.py post <module> [city]   # опубликовать один модуль сейчас (тест)
   python run.py serve                  # запустить планировщик (программа дня)
+  python run.py test-news              # локальный прогон верификации/рерайта, вывод в консоль
+  python run.py test-news-moderate     # то же, но черновик уходит боту-модератору в Telegram
+  python run.py moderate               # запустить бота-модератора (слушает кнопки/правки)
 
 Модули: weather, currency
 Город по умолчанию: novorossiysk
@@ -30,6 +33,15 @@ def main() -> None:
     elif cmd == "serve":
         from scheduler import start
         start()
+    elif cmd == "test-news":
+        from content.news import run_rss_test
+        run_rss_test("https://novorab.ru/feed/")
+    elif cmd == "test-news-moderate":
+        from content.news import run_rss_test_to_moderation
+        run_rss_test_to_moderation("https://novorab.ru/feed/")
+    elif cmd == "moderate":
+        from moderation import ModerationBot
+        ModerationBot().poll_forever()
     else:
         print(USAGE)
 

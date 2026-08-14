@@ -1,0 +1,154 @@
+# Спецификация рубрик и источников city-radio.
+# Машиночитаемая версия решений из "Манифеста рубрик" (согласовано с владельцем 2026-08-13/14).
+#
+# source_type: telegram | vk | rss | web | api | manual
+#   Реализованы в content/news.py на сегодня: rss (реальный источник, все Telegram/VK/web — заглушки,
+#   ждут ключей/адаптеров, см. content/news.py → ADAPTERS).
+# moderation: всегда true = обязательное согласование с владельцем перед публикацией.
+#   Базовый workflow (найти → проверить → переписать → на модерацию → MAX → пауза 30-40с → Telegram)
+#   применяется по умолчанию ко всем рубрикам ниже, кроме отмеченных моду explicitly false
+#   (currency/weather — уже автоматизированы без LLM и без модерации).
+
+proisshestviya:
+  title: "Происшествия"
+  source_type: telegram
+  source: "novosti_efir"
+  cadence: "1-2 в день"
+  moderation: true
+
+zdorove:
+  title: "Здоровье и медицина"
+  source_type: telegram
+  source: "biohakrs"
+  cadence: "раз в 1-2 дня"
+  moderation: true
+
+eda_recepty:
+  title: "Еда и рецепты"
+  source_type: manual
+  source: null  # книга рецептов — не выбрана, отложено
+  cadence: null
+  moderation: true
+
+kino_serialy:
+  title: "Кино и сериалы"
+  source_type: web
+  source: ["kinopoisk.ru", "imdb.com", "telegram:полка_с_сериалами"]  # ротация: новый пост = новый источник
+  rotate: true
+  cadence: "по пятницам"
+  filter: "топ-5, рейтинг >7, новинки Netflix/Amazon/HBO/прокат"
+  moderation: true
+
+puteshestviya:
+  title: "Путешествия"
+  source_type: manual  # генерация фактов/историй, не агрегация
+  source: null
+  cadence: "по средам"
+  moderation: true
+
+chp:
+  title: "Происшествия/ЧП"
+  source_type: telegram
+  source: "chpnvrsk_official"
+  cadence: "все важные/интересные"
+  moderation: true
+
+pogoda:
+  title: "Погода"
+  source_type: api
+  source: "openweather"  # уже реализовано в content/weather.py
+  moderation: false
+
+kurs_valut:
+  title: "Курс валют"
+  source_type: api
+  source: "cbr"  # уже реализовано в content/currency.py
+  moderation: false
+
+afisha:
+  title: "Афиша/события"
+  source_type: web
+  source: "afisha.yandex.ru/novorossiysk,afisha.yandex.ru/gelendzhik"
+  cadence: "ежедневно на завтра; в пятницу — сразу на выходные"
+  moderation: true
+
+kino_seansy:
+  title: "Кино (сеансы)"
+  source_type: web
+  source: "монитор"  # сеть кинотеатров — точный URL уточнить
+  cadence: null
+  moderation: true
+
+goroskop:
+  title: "Гороскоп"
+  source_type: manual  # НЕ настоящий гороскоп — выдуманный псевдо-факт/предсказание
+  source: null
+  cadence: "ежедневно, утро"
+  tone: "можно в манере Йоды"
+  moderation: true
+
+yumor:
+  title: "Юмор/мемы города"
+  source_type: vk
+  source: "Палата №6"
+  cadence: "2 раза в сутки"
+  filter: "публикации с 200+ лайками"
+  moderation: true
+
+nostalgiya:
+  title: "Городская ностальгия/красивые места"
+  source_type: manual  # открытые источники/местные паблики, вручную
+  source: null
+  cadence: "каждое утро"
+  requires_source_link: true
+  moderation: true
+
+novorossiysk_segodnya:
+  title: "Новороссийск сегодня"
+  source_type: vk
+  source: "Я люблю Новороссийск"
+  cadence: "3-4 новости"
+  moderation: true
+
+zhkh:
+  title: "Вода, свет и ЖКХ"
+  source_type: telegram
+  source: "chpnvrsk_official"
+  cadence: null
+  moderation: true
+
+nordost_pogoda:
+  title: "Норд-ост и погода"
+  source_type: manual  # администрация Новороссийска — точный канал уточнить
+  source: "администрация Новороссийска"
+  cadence: "по факту (штормы/предупреждения)"
+  moderation: true
+
+more_plyazhi:
+  title: "Море и пляжи"
+  source_type: web
+  source: "gismeteo.ru"
+  cadence: "ежедневно"
+  moderation: true
+
+eda_novorossiyska:
+  title: "Еда Новороссийска"
+  source_type: manual
+  source: "nespeshnik (instagram) + локальные паблики"
+  cadence: "по инфоповоду, редко"
+  moderation: true
+
+lyudi_istoriya:
+  title: "Люди и история города"
+  source_type: mixed
+  source: ["telegram:novohistoryinphoto", "web:novomuseum.ru"]  # по очереди
+  rotate: true
+  cadence: "раз в неделю + обязательно перед праздниками"
+  moderation: true
+
+chto_posmotret:
+  title: "Рекомендация «Что посмотреть»"
+  source_type: manual  # instagram ed.prokino, kino_es — нет headless-доступа без вас
+  source: "ed.prokino, kino_es (instagram)"
+  cadence: null
+  moderation: true
