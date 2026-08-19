@@ -2,6 +2,15 @@
 .venv/
 venv/
 .env
+*.session
+*.session-journal
+telethon_login_state.json
+moderation_state.json
+rotation_state.json
+media_cache/
+digest.db
+digest.db-wal
+digest.db-shm
 
 # python
 __pycache__/

@@ -3,3 +3,5 @@ apscheduler
 python-dotenv
 pyyaml
 feedparser
+telethon
+Pillow
