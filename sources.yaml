@@ -25,15 +25,38 @@ zdorove:
 
 eda_recepty:
   title: "Еда и рецепты"
-  source_type: manual
-  source: null  # книга рецептов — не выбрана, отложено
-  cadence: null
+  source_type: telegram
+  source:  # ротация: новый пост = новый источник
+    - "telegram:min2ru"
+    - "telegram:blog_andychef"
+    - "telegram:foodrumedia"
+    - "telegram:tveda"
+    - "telegram:thesaltmagazine"
+    - "telegram:foodandscience"
+    - "telegram:foodiscovery"
+    - "telegram:culinary_abuse"
+  rotate: true
+  cadence: "раз в сутки, ориентир 10:00-11:00"
   moderation: true
 
 kino_serialy:
   title: "Кино и сериалы"
-  source_type: web
-  source: ["kinopoisk.ru", "imdb.com", "telegram:полка_с_сериалами"]  # ротация: новый пост = новый источник
+  source_type: mixed
+  source:  # ротация: новый пост = новый источник
+    - "kinopoisk.ru"
+    - "imdb.com"
+    - "telegram:polkasserialami"
+    - "telegram:kinopoisk"
+    - "telegram:kinopoisk_soon"
+    - "telegram:kinotvnews"
+    - "telegram:remizorro"
+    - "telegram:MaxAndSe"
+    - "telegram:seance_light"
+    - "telegram:Cronenberg1664"
+    - "telegram:FBChu"
+    - "telegram:KingOfYantar"
+    - "telegram:filmres"
+    - "telegram:movies_filmy"
   rotate: true
   cadence: "по пятницам"
   filter: "топ-5, рейтинг >7, новинки Netflix/Amazon/HBO/прокат"
@@ -53,12 +76,6 @@ chp:
   cadence: "все важные/интересные"
   moderation: true
 
-pogoda:
-  title: "Погода"
-  source_type: api
-  source: "openweather"  # уже реализовано в content/weather.py
-  moderation: false
-
 kurs_valut:
   title: "Курс валют"
   source_type: api
@@ -68,14 +85,14 @@ kurs_valut:
 afisha:
   title: "Афиша/события"
   source_type: web
-  source: "afisha.yandex.ru/novorossiysk,afisha.yandex.ru/gelendzhik"
+  source: "https://www.afisha.ru/novorossijsk/"  # afisha.yandex.ru требовал JS — заменили 2026-08-17
   cadence: "ежедневно на завтра; в пятницу — сразу на выходные"
   moderation: true
 
 kino_seansy:
   title: "Кино (сеансы)"
   source_type: web
-  source: "монитор"  # сеть кинотеатров — точный URL уточнить
+  source: "https://www.afisha.ru/novorossijsk/cinema/"  # витрина проката — этого достаточно (2026-08-17)
   cadence: null
   moderation: true
 
@@ -89,24 +106,34 @@ goroskop:
 
 yumor:
   title: "Юмор/мемы города"
-  source_type: vk
-  source: "Палата №6"
+  source_type: telegram
+  source:  # ротация: новый пост = новый источник
+    - "telegram:leoday"
+    - "telegram:memachh"
+    - "telegram:mudak"
+  rotate: true
   cadence: "2 раза в сутки"
-  filter: "публикации с 200+ лайками"
+  filter: "популярные публикации (топ по реакциям/охвату)"
   moderation: true
 
 nostalgiya:
   title: "Городская ностальгия/красивые места"
-  source_type: manual  # открытые источники/местные паблики, вручную
-  source: null
+  source_type: telegram  # найдено 2026-08-17, Instagram-путь закрыт (см. eda_novorossiyska)
+  source:  # ротация: новый пост = новый источник
+    - "telegram:novohistoryinphoto"
+    - "telegram:kuda_idem_nvrsk"
+  rotate: true
   cadence: "каждое утро"
   requires_source_link: true
   moderation: true
 
 novorossiysk_segodnya:
   title: "Новороссийск сегодня"
-  source_type: vk
-  source: "Я люблю Новороссийск"
+  source_type: telegram
+  source:  # ротация: новый пост = новый источник
+    - "telegram:novorosstoday"
+    - "telegram:first_nvrsk"
+  rotate: true
   cadence: "3-4 новости"
   moderation: true
 
@@ -119,22 +146,27 @@ zhkh:
 
 nordost_pogoda:
   title: "Норд-ост и погода"
-  source_type: manual  # администрация Новороссийска — точный канал уточнить
-  source: "администрация Новороссийска"
+  source_type: telegram  # официальный канал администрации Новороссийска, подтверждён 2026-08-17
+  source: "nvrskadm"
   cadence: "по факту (штормы/предупреждения)"
   moderation: true
 
 more_plyazhi:
-  title: "Море и пляжи"
+  title: "Погода и море"  # объединили с "Море и пляжи" по просьбе владельца 2026-08-17
   source_type: web
-  source: "gismeteo.ru"
-  cadence: "ежедневно"
-  moderation: true
+  source: "https://yandex.ru/pogoda/ru/novorossiysk/details/watersports"
+  # одна страница отдаёт: температура воды, УФ-индекс (пик дня), магнитные бури,
+  # пыльца, фаза Луны, восход/закат, световой день — см. YandexPogodaSource
+  cadence: "ежедневно, 08:00"
+  moderation: false  # проверено на практике, публикуется автоматом — см. content/weather.py (2026-08-17)
 
 eda_novorossiyska:
   title: "Еда Новороссийска"
-  source_type: manual
-  source: "nespeshnik (instagram) + локальные паблики"
+  source_type: telegram  # Instagram (nespeshnik) закрыт — сессия OpenCLI разлогинена, 2026-08-17
+  source:  # ротация: новый пост = новый источник
+    - "telegram:vinoterria"
+    - "telegram:yappi_restaurants"
+  rotate: true
   cadence: "по инфоповоду, редко"
   moderation: true
 
@@ -148,7 +180,10 @@ lyudi_istoriya:
 
 chto_posmotret:
   title: "Рекомендация «Что посмотреть»"
-  source_type: manual  # instagram ed.prokino, kino_es — нет headless-доступа без вас
-  source: "ed.prokino, kino_es (instagram)"
+  source_type: telegram  # Instagram закрыт — заменили 2026-08-17
+  source:  # ротация: новый пост = новый источник
+    - "telegram:ed_prokino"
+    - "telegram:kinopes"
+  rotate: true
   cadence: null
   moderation: true
