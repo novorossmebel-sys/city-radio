@@ -1,45 +1,25 @@
-"""Модуль погоды. Источник — OpenWeather (нужен бесплатный ключ).
+"""Модуль погоды — публикуется автоматически, без модерации (владелец, 2026-08-17): рубрика
+"Погода и море" уже проверена на практике и не нуждается в ручной проверке, как курс валют.
 
-Без ключа модуль возвращает None и просто пропускается.
+Переиспользует YandexPogodaSource и build_structured_draft из content/news.py — та же логика
+(сезонная картинка, разделитель, температура воздуха/воды и т.д.), что и в модерации, просто
+без похода к владельцу за подтверждением.
 """
-import requests
-
-from config import settings
-from .base import ContentModule, Post
-
-OWM_URL = "https://api.openweathermap.org/data/2.5/weather"
+from content.base import ContentModule, Post
+from content.news import YandexPogodaSource, build_structured_draft
 
 
 class WeatherModule(ContentModule):
     name = "weather"
 
-    def build(self, city: dict):
-        key = settings.OPENWEATHER_API_KEY
-        if not key:
-            return None  # ключ не задан — модуль пропускается
+    def build(self, city: dict) -> Post | None:
+        try:
+            items = YandexPogodaSource().fetch()
+        except Exception as e:
+            print(f"[weather] не смог получить данные с Яндекс.Погоды: {e}")
+            return None
+        if not items:
+            return None
 
-        w = city["weather"]
-        r = requests.get(
-            OWM_URL,
-            params={
-                "lat": w["lat"],
-                "lon": w["lon"],
-                "appid": key,
-                "units": "metric",
-                "lang": "ru",
-            },
-            timeout=15,
-        ).json()
-
-        temp = round(r["main"]["temp"])
-        feels = round(r["main"]["feels_like"])
-        desc = r["weather"][0]["description"].capitalize()
-        wind = round(r["wind"]["speed"])
-
-        text = (
-            f"🌤 <b>Погода — {city['title']}</b>\n\n"
-            f"{desc}\n"
-            f"🌡 {temp}°C (ощущается {feels}°C)\n"
-            f"💨 Ветер {wind} м/с"
-        )
-        return Post(text=text)
+        draft = build_structured_draft("Погода и море", items[0])
+        return draft.to_post()

@@ -6,11 +6,13 @@
 from dataclasses import dataclass, field
 from typing import Optional
 
+TELEGRAM_CAPTION_LIMIT = 1024  # лимит Bot API на подпись к фото/альбому
+
 
 @dataclass
 class Post:
     text: str
-    image_path: Optional[str] = None  # локальный путь к картинке, если есть
+    image_paths: list = field(default_factory=list)  # локальные пути к картинкам, если есть (альбом — несколько)
     parse_mode: str = "HTML"
 
 
@@ -37,7 +39,13 @@ class Draft:
     body: str
     concerns: list = field(default_factory=list)  # причины насторожиться при проверке, пусто = ок
     needs_manual_review: bool = False  # True = модель сама просит внимательнее посмотреть перед публикацией
+    include_source: bool = False  # по умолчанию скрыт; кнопка в модерации явно включает показ ссылки
+    image_paths: list = field(default_factory=list)  # фото из исходного поста, если есть
+    include_photo: bool = True  # по умолчанию показан (в отличие от источника) — это часть контента
 
     def to_post(self) -> Post:
-        text = f"<b>{self.title}</b>\n\n{self.body}\n\n<a href=\"{self.source_url}\">Источник: {self.source_name}</a>"
-        return Post(text=text)
+        parts = [f"📻 {self.rubric}", "", f"<b>{self.title}</b>", "", self.body]
+        if self.include_source and self.source_url:
+            parts += ["", f"<a href=\"{self.source_url}\">Источник: {self.source_name}</a>"]
+        images = self.image_paths if (self.include_photo and self.image_paths) else []
+        return Post(text="\n".join(parts), image_paths=images)
