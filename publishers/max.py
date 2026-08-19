@@ -35,7 +35,7 @@ class MaxPublisher(Publisher):
         if not self.token or not channel:
             return False  # нет токена или канал не задан — тихо пропускаем
 
-        if post.image_path:
+        if post.image_paths:
             # Картинки в MAX требуют предварительной загрузки (upload → token → attachment).
             # Пока не реализовано — отправляем только текст.
             print("[max] картинки пока не поддержаны — отправляю только текст")

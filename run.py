@@ -4,6 +4,8 @@
   python run.py serve                  # запустить планировщик (программа дня)
   python run.py test-news              # локальный прогон верификации/рерайта, вывод в консоль
   python run.py test-news-moderate     # то же, но черновик уходит боту-модератору в Telegram
+  python run.py test-telegram <channel> [rubric]  # прогон на реальном Telegram-канале (Telethon)
+  python run.py test-vk <group_screen_name> [rubric]  # прогон на реальном VK-паблике
   python run.py moderate               # запустить бота-модератора (слушает кнопки/правки)
 
 Модули: weather, currency
@@ -39,6 +41,22 @@ def main() -> None:
     elif cmd == "test-news-moderate":
         from content.news import run_rss_test_to_moderation
         run_rss_test_to_moderation("https://novorab.ru/feed/")
+    elif cmd == "test-telegram":
+        if len(sys.argv) < 3:
+            print("Использование: python run.py test-telegram <channel> [rubric]")
+            return
+        from content.news import run_telegram_test
+        channel = sys.argv[2]
+        rubric = sys.argv[3] if len(sys.argv) > 3 else "Тест механики (Telegram)"
+        run_telegram_test(channel, rubric)
+    elif cmd == "test-vk":
+        if len(sys.argv) < 3:
+            print("Использование: python run.py test-vk <group_screen_name> [rubric]")
+            return
+        from content.news import run_vk_test
+        group = sys.argv[2]
+        rubric = sys.argv[3] if len(sys.argv) > 3 else "Тест механики (VK)"
+        run_vk_test(group, rubric)
     elif cmd == "moderate":
         from moderation import ModerationBot
         ModerationBot().poll_forever()
