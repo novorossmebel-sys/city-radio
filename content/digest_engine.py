@@ -11,6 +11,8 @@
   просто без ручного триггера).
 """
 import re
+from datetime import datetime
+from pathlib import Path
 
 import yaml
 
@@ -33,6 +35,14 @@ from content.source_policy import (
 SOURCES_FILE = "sources.yaml"
 FAST_POLL_LIMIT = 5   # алертных каналов немного, можно взять чуть больше свежих постов
 NORMAL_POLL_LIMIT = 5
+
+# Отметка "collect_candidates реально дошёл до конца, не завис" — читает supervisor.py.
+# Обновляется независимо от того, нашлось ли что-то новое: сам факт возврата из функции
+# важен, а не найденный контент (2026-08-20 — Telethon завис на MsgidDecreaseRetryError
+# на много часов, ни разу не бросив исключение наружу, только на перезапуске процесса
+# отпустило: content/digest_store.py's WAL-фикс от 2026-08-19 лечит конкурентную запись,
+# это отдельная история про подвисший event loop).
+HEARTBEAT_FILE = Path("scheduler_heartbeat.txt")
 
 PRIMARY_TYPES = (
     "LOCAL_ALERT", "LOCAL_STATUS", "LOCAL_UTILITY", "LOCAL_EVENT",
@@ -451,3 +461,5 @@ def collect_candidates(fast_only: bool = False) -> None:
                 _process_item(rubric, channel, item)
             except Exception as e:
                 print(f"[digest_engine] ошибка обработки поста @{channel}: {e}")
+
+    HEARTBEAT_FILE.write_text(datetime.now().isoformat())

@@ -11,6 +11,7 @@ media_cache/
 digest.db
 digest.db-wal
 digest.db-shm
+scheduler_heartbeat.txt
 
 # python
 __pycache__/

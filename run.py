@@ -2,6 +2,8 @@
 
   python run.py post <module> [city]   # опубликовать один модуль сейчас (тест)
   python run.py serve                  # запустить планировщик (программа дня)
+  python run.py serve-supervised       # то же, но под наблюдателем (supervisor.py) —
+                                        # перезапускает при зависании/падении, см. supervisor.py
   python run.py test-news              # локальный прогон верификации/рерайта, вывод в консоль
   python run.py test-news-moderate     # то же, но черновик уходит боту-модератору в Telegram
   python run.py test-telegram <channel> [rubric]  # прогон на реальном Telegram-канале (Telethon)
@@ -35,6 +37,9 @@ def main() -> None:
     elif cmd == "serve":
         from scheduler import start
         start()
+    elif cmd == "serve-supervised":
+        from supervisor import run_supervised
+        run_supervised()
     elif cmd == "test-news":
         from content.news import run_rss_test
         run_rss_test("https://novorab.ru/feed/")
