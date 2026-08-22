@@ -25,6 +25,30 @@ FAST_POLL_MINUTES = 15    # алертные каналы (nvrskadm, chpnvrsk_of
 NORMAL_POLL_MINUTES = 60  # остальные 17 рубрик — копятся в пулы DIGEST/WEEKLY/HUMOR_POOL
 
 
+def _safe(fn):
+    """Оборачивает задачу планировщика: APScheduler и так не роняет весь процесс на
+    исключении из одной задачи, но по умолчанию просто пишет traceback через logging,
+    который никто не читает — ровно так compose_weekly (2026-08-21, единственный на тот
+    момент реальный прогон по пятничному cron) и compose_evening_digest один раз молча
+    не долетели до владельца из-за обрыва соединения с api.telegram.org, и compose_weekly
+    из-за этого не повторится ещё неделю (cron раз в неделю, retry нет). Теперь любая
+    такая ошибка хотя бы уходит владельцу в бот, а не тонет в логе фонового процесса."""
+    def wrapped(*args, **kwargs):
+        try:
+            fn(*args, **kwargs)
+        except Exception as e:
+            print(f"[scheduler] {fn.__name__} упал с ошибкой: {e}")
+            try:
+                from moderation import ModerationBot
+                bot = ModerationBot()
+                if bot.token and bot.owner_chat_id:
+                    bot.send_text(bot.owner_chat_id, f"⚠️ {fn.__name__} не выполнился: {e}")
+            except Exception:
+                pass
+    wrapped.__name__ = getattr(fn, "__name__", "job")
+    return wrapped
+
+
 def start() -> None:
     cities = load_cities()
     sched = BlockingScheduler(timezone="Europe/Moscow")
@@ -40,14 +64,14 @@ def start() -> None:
                 id=f"{city_key}-{module}-{hour:02d}{minute:02d}",
             )
 
-    sched.add_job(collect_candidates, "interval", minutes=FAST_POLL_MINUTES,
+    sched.add_job(_safe(collect_candidates), "interval", minutes=FAST_POLL_MINUTES,
                   args=[True], id="digest-collect-fast")
-    sched.add_job(collect_candidates, "interval", minutes=NORMAL_POLL_MINUTES,
+    sched.add_job(_safe(collect_candidates), "interval", minutes=NORMAL_POLL_MINUTES,
                   args=[False], id="digest-collect-normal")
-    sched.add_job(compose_morning_radar, "cron", hour=6, minute=30, id="digest-morning")
-    sched.add_job(select_humor, "cron", hour=18, minute=0, id="digest-humor-select")
-    sched.add_job(compose_evening_digest, "cron", hour=19, minute=0, id="digest-evening")
-    sched.add_job(compose_weekly, "cron", day_of_week="fri", hour=12, minute=0, id="digest-weekly")
+    sched.add_job(_safe(compose_morning_radar), "cron", hour=6, minute=30, id="digest-morning")
+    sched.add_job(_safe(select_humor), "cron", hour=18, minute=0, id="digest-humor-select")
+    sched.add_job(_safe(compose_evening_digest), "cron", hour=19, minute=0, id="digest-evening")
+    sched.add_job(_safe(compose_weekly), "cron", day_of_week="fri", hour=12, minute=0, id="digest-weekly")
 
     print("[scheduler] запущен. Программа дня + дайджест-движок активны. Ctrl+C для выхода.")
     sched.start()

@@ -209,6 +209,7 @@ class RssSource:
 
 MEDIA_CACHE_DIR = Path("media_cache")  # скачанные фото источников, gitignored, чистится после публикации
 MAX_ALBUM_PHOTOS = 10  # ограничение самого Telegram на размер media group
+MAX_PHOTO_BYTES = 9_000_000  # с запасом под лимит Bot API sendPhoto (10 МБ) — см. _download_photos
 
 
 class TelegramChannelSource:
@@ -231,12 +232,25 @@ class TelegramChannelSource:
     def _download_photos(self, client, messages: list) -> list:
         paths = []
         for msg in messages[:MAX_ALBUM_PHOTOS]:
-            if not msg.photo:
+            # msg.photo одного этого сообщения недостаточно, чтобы гарантировать, что скачается
+            # именно фото — client.download_media(msg, ...) получал целое сообщение и иногда
+            # (кино-трейлер посты в альбоме вперемешку с видео) утаскивал видео-часть под .jpg
+            # (найдено 2026-08-22: несколько "фото" по 30-180 МБ, реально MP4-контейнеры,
+            # одно из них сломало реальную отправку в модерацию — Telegram отклоняет фото >10 МБ).
+            # Явно передаём client.download_media(msg.photo, ...) — просим скачать конкретно
+            # фото-объект, а не "что найдётся в сообщении" — плюс отдельные guard'ы и потолок
+            # по размеру файла на случай, если и это не исчерпывающая защита.
+            if not msg.photo or msg.video or getattr(msg, "gif", None) or getattr(msg, "video_note", None):
                 continue
             MEDIA_CACHE_DIR.mkdir(exist_ok=True)
             dest = MEDIA_CACHE_DIR / f"{uuid.uuid4().hex}.jpg"
             try:
-                client.download_media(msg, file=str(dest))
+                client.download_media(msg.photo, file=str(dest))
+                if dest.exists() and dest.stat().st_size > MAX_PHOTO_BYTES:
+                    print(f"[news] фото {msg.id} из @{self.channel_username} весит "
+                          f"{dest.stat().st_size} байт (>{MAX_PHOTO_BYTES}) — похоже на видео, пропускаю")
+                    dest.unlink(missing_ok=True)
+                    continue
                 normalize_photo(str(dest))
                 paths.append(str(dest))
             except Exception as e:

@@ -317,9 +317,23 @@ def _build_draft_for_now(rubric: str, channel: str, item: RawItem, data: dict) -
     )
 
 
+def _cleanup_item_images(item: RawItem) -> None:
+    """Кандидат не дошёл (или дойдёт, но без фото — ARCHIVE) до модерации, значит
+    _cleanup_images() в moderation.py его никогда не подхватит — без этого скачанные
+    фото/видео так и лежали бы в media_cache/ вечно (нашли 2.6 ГБ накопленных
+    2026-08-22, включая несколько видео, ошибочно скачанных как "фото" — см. правку
+    _download_photos в content/news.py)."""
+    for path in item.image_paths:
+        try:
+            Path(path).unlink(missing_ok=True)
+        except Exception as e:
+            print(f"[digest_engine] не смог удалить {path}: {e}")
+
+
 def _process_item(rubric: str, channel: str, item: RawItem) -> None:
     item.text = _strip_channel_footer(item.text)
     if not item.text:
+        _cleanup_item_images(item)
         return
 
     combined_text = f"{item.title} {item.text}"
@@ -330,6 +344,7 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
         reason = _pre_filter_hard_drop(combined_text)
         if reason:
             print(f"[digest_engine] дроп @{channel}: {reason}")
+            _cleanup_item_images(item)
             return
         insert_candidate(
             source_channel=channel, rubric=rubric, raw_title=item.title, raw_text=item.text,
@@ -349,18 +364,22 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
             event_key=None, title=item.title, body=item.text,
             needs_manual_review=True, route="ARCHIVE", status="archived",
         )
+        _cleanup_item_images(item)  # ARCHIVE никогда не уходит в модерацию — фото не нужны
         return
 
     drop_reason = _pre_filter_hard_drop(combined_text)
     if drop_reason:
         print(f"[digest_engine] дроп @{channel}: {drop_reason}")
+        _cleanup_item_images(item)
         return
 
     data = _classify(rubric, channel, item)
     if data is None:
+        _cleanup_item_images(item)
         return  # сбой LLM — уже залогирован в _classify, не роняем весь опрос
     if data.get("is_advertisement"):
         print(f"[digest_engine] дроп @{channel}: реклама (LLM-классификация)")
+        _cleanup_item_images(item)
         return
 
     entity, event_type = data.get("entity", ""), data.get("event_type", data["primary_type"])
@@ -381,6 +400,7 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
 
         if novelty == 0:
             print(f"[digest_engine] дроп @{channel}: novelty=0 (event_key={event_key})")
+            _cleanup_item_images(item)
             return  # ничего нового относительно уже увиденного — раздел 8, NOVELTY=0
 
         upsert_event(event_key, data["primary_type"], new_status or "OPEN", action or item.title, channel)
@@ -389,6 +409,7 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
 
     if event_key and is_in_cooldown(event_key, data["primary_type"]) and novelty < 3:
         print(f"[digest_engine] дроп @{channel}: cooldown, novelty={novelty}<3 (event_key={event_key})")
+        _cleanup_item_images(item)
         return  # раздел 18: во время cooldown публикуется только при NOVELTY >= 3
 
     novelty_score = novelty * 4  # раздел 9 задаёт компонент 0-20, раздел 8 — тир 0-5; шкалируем x4
@@ -416,6 +437,7 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
     route = _route_for(data["primary_type"], total_score, data.get("time_sensitive", False), status_changed)
     if route == "DROP":
         print(f"[digest_engine] дроп @{channel}: score={total_score}<45")
+        _cleanup_item_images(item)
         return
 
     if event_key and route in ("NOW", "DIGEST", "WEEKLY"):
@@ -436,6 +458,8 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
         penalty=penalty, total_score=total_score, route=route, status="scored",
     )
     candidate_id = insert_candidate(**candidate_fields)
+    if route == "ARCHIVE":
+        _cleanup_item_images(item)  # ARCHIVE никогда не уходит в модерацию — фото не нужны
 
     if route == "NOW":
         from moderation import ModerationBot  # локальный импорт — как и в content/news.py
