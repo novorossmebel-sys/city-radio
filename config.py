@@ -29,6 +29,12 @@ class Settings:
 
     VK_API_TOKEN = os.getenv("VK_API_TOKEN", "")
 
+    # TMDB (themoviedb.org) — реальные постеры для кино-рубрик вместо YandexART-заглушки.
+    # v3 API-ключ (Developer plan, бесплатно). v4 Read Access Token не используется — не
+    # нужен для простого поиска/постеров, оставлен на будущее в TMDB_READ_ACCESS_TOKEN.
+    TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
+    TMDB_READ_ACCESS_TOKEN = os.getenv("TMDB_READ_ACCESS_TOKEN", "")
+
 
 settings = Settings()
 

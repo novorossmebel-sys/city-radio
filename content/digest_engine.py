@@ -33,6 +33,11 @@ from content.source_policy import (
     role_for, HUMOR_ONLY_CHANNELS, HEALTH_CLAIM_SOURCE, HEALTH_CLAIM_TRIGGERS,
     AD_KEYWORDS, SELF_PROMO_KEYWORDS, ENGAGEMENT_KEYWORDS, matches_any,
 )
+from content.tmdb import fetch_poster
+
+CINEMA_PRIMARY_TYPES = {
+    "CINEMA_RELEASE", "CINEMA_TRAILER", "CINEMA_CASTING", "CINEMA_REVIEW", "CINEMA_ANALYSIS",
+}
 
 SOURCES_FILE = "sources.yaml"
 FAST_POLL_LIMIT = 5   # алертных каналов немного, можно взять чуть больше свежих постов
@@ -387,6 +392,15 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
     entity, event_type = data.get("entity", ""), data.get("event_type", data["primary_type"])
     location, action = data.get("location", ""), data.get("action", "")
     event_key = _event_key(entity, event_type, location, action) if entity else None
+
+    if data["primary_type"] in CINEMA_PRIMARY_TYPES and entity:
+        # настоящий постер вместо случайного фото источника (скриншот, кадр, обложка
+        # телеграм-поста) или сгенерированной YandexART-иллюстрации — владелец явно
+        # хотел "просто постер" (2026-08-18), ключ TMDB подключили 2026-08-25.
+        poster = fetch_poster(entity)
+        if poster:
+            _cleanup_item_images(item)
+            item.image_paths = [poster]
 
     status_changed = False
     new_status = None
