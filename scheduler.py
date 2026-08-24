@@ -64,10 +64,14 @@ def start() -> None:
                 id=f"{city_key}-{module}-{hour:02d}{minute:02d}",
             )
 
+    # jitter — точные интервалы без разброса сами по себе выглядят как автоматизация
+    # (см. 2026-08-24, риск повторной блокировки Telethon-наблюдателя); на публикации
+    # по расписанию ниже jitter не ставим — их время по смыслу должно быть предсказуемым
+    # для читателя.
     sched.add_job(_safe(collect_candidates), "interval", minutes=FAST_POLL_MINUTES,
-                  args=[True], id="digest-collect-fast")
+                  jitter=180, args=[True], id="digest-collect-fast")
     sched.add_job(_safe(collect_candidates), "interval", minutes=NORMAL_POLL_MINUTES,
-                  args=[False], id="digest-collect-normal")
+                  jitter=600, args=[False], id="digest-collect-normal")
     sched.add_job(_safe(compose_morning_radar), "cron", hour=6, minute=30, id="digest-morning")
     sched.add_job(_safe(select_humor), "cron", hour=18, minute=0, id="digest-humor-select")
     sched.add_job(_safe(compose_evening_digest), "cron", hour=19, minute=0, id="digest-evening")

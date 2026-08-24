@@ -10,7 +10,9 @@
   NOW-маршрут — сразу Draft → ModerationBot.send_draft() (тот же путь, что и раньше,
   просто без ручного триггера).
 """
+import random
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -474,7 +476,12 @@ def collect_candidates(fast_only: bool = False) -> None:
     targets = _channels_to_poll(fast_only)
     limit = FAST_POLL_LIMIT if fast_only else NORMAL_POLL_LIMIT
     print(f"[digest_engine] опрос {'алертных' if fast_only else 'всех'} каналов: {len(targets)} источников")
-    for rubric, channel, adapter in targets:
+    for i, (rubric, channel, adapter) in enumerate(targets):
+        if i > 0:
+            # небольшая случайная пауза между каналами — подряд идущие Telethon-запросы
+            # без пауз выглядят как скрейпер сильнее, чем сам факт периодичности опроса
+            # (см. обсуждение 2026-08-24 про риск повторной блокировки наблюдателя)
+            time.sleep(random.uniform(1.5, 4.5))
         try:
             items = _fetch_new_items(channel, adapter, limit)
         except Exception as e:
