@@ -248,12 +248,28 @@ class ModerationBot:
             except OSError:
                 pass
 
+    def _send_text_with_keyboard(self, chat_id, text: str, keyboard: dict) -> bool:
+        try:
+            r = requests.post(
+                self._api("sendMessage"),
+                json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": keyboard},
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            print(f"[moderation] сетевая ошибка при отправке черновика: {e}")
+            return False
+        if not r.ok or not r.json().get("ok"):
+            print(f"[moderation] не смог отправить черновик: {r.text}")
+            return False
+        return True
+
     def send_draft(self, draft: Draft) -> str:
         """Отправляет черновик владельцу на модерацию. Возвращает id черновика."""
         draft_id = uuid.uuid4().hex[:8]
         self.pending[draft_id] = draft
         text = _format_draft_message(draft)
         keyboard = _keyboard_for(draft, draft_id)
+        photo_delivered = False
 
         # короткий текст + одно фото — превью одним сообщением (фото+подпись+кнопки),
         # так и будет выглядеть реальный пост. Альбом (несколько фото) не может нести
@@ -261,30 +277,24 @@ class ModerationBot:
         # раздельно, как и длинный текст (не влезает в лимит подписи).
         if len(draft.image_paths) == 1 and len(text) <= TELEGRAM_CAPTION_LIMIT:
             msg_id = self._send_photo_with_caption(self.owner_chat_id, draft.image_paths[0], text, keyboard)
-            if msg_id is None:
-                print("[moderation] не смог отправить черновик с фото")
-            self._save_state()
-            return draft_id
-
-        if draft.image_paths:
+            photo_delivered = msg_id is not None
+            if not photo_delivered:
+                # без фолбэка ниже черновик оставался "отправленным" только в self.pending —
+                # владелец никогда не видел карточку и не мог на неё нажать (нашли 2026-08-24:
+                # битое/слишком большое фото роняло именно эту ветку, карточка молча повисала)
+                print("[moderation] не смог отправить черновик с фото — пробую текстом без фото")
+        elif draft.image_paths:
             photo_ids = self._send_photos_preview(self.owner_chat_id, draft.image_paths)
             if photo_ids:
                 self.photo_messages[draft_id] = photo_ids
 
         self._save_state()
 
-        r = requests.post(
-            self._api("sendMessage"),
-            json={
-                "chat_id": self.owner_chat_id,
-                "text": text,
-                "parse_mode": "HTML",
-                "reply_markup": keyboard,
-            },
-            timeout=30,
-        )
-        if not r.ok or not r.json().get("ok"):
-            print(f"[moderation] не смог отправить черновик: {r.text}")
+        if not photo_delivered:
+            if not self._send_text_with_keyboard(self.owner_chat_id, text, keyboard):
+                time.sleep(3)
+                if not self._send_text_with_keyboard(self.owner_chat_id, text, keyboard):
+                    print(f"[moderation] черновик {draft_id} так и не удалось доставить владельцу")
         return draft_id
 
     def _publish_draft(self, draft: Draft) -> bool:
