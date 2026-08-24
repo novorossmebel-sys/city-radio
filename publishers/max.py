@@ -1,13 +1,13 @@
 """Публикатор в MAX через Bot API.
 
-Токен бота: @MasterBot → /create. Метод: POST /messages, тело {"text","format"}.
+Токен бота: @MasterBot → /create (с 2026-08-25 создание бота проходит модерацию MAX,
+до суток, раньше выдавало токен сразу). Метод: POST /messages, тело {"text","format"}.
 
-⚠️ ТРЕБУЕТ ПРОВЕРКИ НА ЖИВОМ ТОКЕНЕ. Вторичные источники расходятся по:
-  1) базовому URL: platform-api.max.ru  ИЛИ  platform-api2.max.ru;
-  2) авторизации: заголовок "Authorization: <token>"  ИЛИ  "Authorization: Bearer <token>"
-     (передача токена через query-параметр access_token объявлена устаревшей).
-Обе точки вынесены в константы ниже — если получишь 401/403/404, поменяй их
-по факту (официальная дока: dev.max.ru/docs). Логика поста при этом не меняется.
+✅ ПРОВЕРЕНО НА ЖИВОМ ТОКЕНЕ 2026-08-25 — базовый URL и заголовок авторизации ниже
+подтверждены реальной публикацией, менять не нужно. Единственная реальная ловушка была
+не в этом, а в chat_id: то, что видно в ссылке канала ("id231536618490_biz"), — это
+публичный слаг, не chat_id. Настоящий числовой chat_id (со знаком минус, как у Telegram)
+узнаётся через GET {MAX_API_BASE}/chats под токеном бота (см. cities.yaml).
 """
 import requests
 
@@ -15,14 +15,11 @@ from config import settings
 from content.base import Post
 from .base import Publisher
 
-# --- настройки, которые, возможно, придётся подправить после теста ---
-MAX_API_BASE = "https://platform-api.max.ru"   # альтернатива: https://platform-api2.max.ru
+MAX_API_BASE = "https://platform-api.max.ru"
 
 
 def _auth_header(token: str) -> dict:
-    # Если получишь 401 — попробуй вернуть {"Authorization": f"Bearer {token}"}
     return {"Authorization": token}
-# ---------------------------------------------------------------------
 
 
 class MaxPublisher(Publisher):
