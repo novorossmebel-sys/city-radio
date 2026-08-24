@@ -304,7 +304,7 @@ def _route_for(primary_type: str, total_score: int, time_sensitive: bool, status
     return "DROP"
 
 
-def _build_draft_for_now(rubric: str, channel: str, item: RawItem, data: dict) -> Draft:
+def _build_draft_for_now(rubric: str, channel: str, item: RawItem, data: dict, candidate_id: int) -> Draft:
     image_paths = item.image_paths
     if channel in DANGER_SOURCE_CHANNELS:
         matched = _danger_photo_for(f"{item.title} {item.text}")
@@ -321,6 +321,7 @@ def _build_draft_for_now(rubric: str, channel: str, item: RawItem, data: dict) -
         concerns=[],
         needs_manual_review=data.get("needs_manual_review", False),
         image_paths=_ensure_image(rubric, data["title"], data["body"], image_paths),
+        candidate_ids=[candidate_id],
     )
 
 
@@ -481,7 +482,7 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
         from moderation import ModerationBot  # локальный импорт — как и в content/news.py
         bot = ModerationBot()
         if bot.token and bot.owner_chat_id:
-            draft = _build_draft_for_now(rubric, channel, item, data)
+            draft = _build_draft_for_now(rubric, channel, item, data, candidate_id)
             bot.send_draft(draft)
             update_candidate_status(candidate_id, "sent_moderation", digest_slot="now")
 

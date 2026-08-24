@@ -42,6 +42,10 @@ class Draft:
     include_source: bool = False  # по умолчанию скрыт; кнопка в модерации явно включает показ ссылки
     image_paths: list = field(default_factory=list)  # фото из исходного поста, если есть
     include_photo: bool = True  # по умолчанию показан (в отличие от источника) — это часть контента
+    candidate_ids: list = field(default_factory=list)  # id-шники в digest_store.candidates —
+    # обычно один, но синтез из нескольких мнений (кино, digest_compose.py) даёт несколько;
+    # moderation.py по ним обновляет статус после решения владельца (было: навсегда
+    # "sent_moderation", см. обсуждение 2026-08-19/25)
 
     def to_post(self) -> Post:
         parts = [f"📻 {self.rubric}", "", f"<b>{self.title}</b>", "", self.body]

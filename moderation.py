@@ -453,7 +453,9 @@ class ModerationBot:
 
             self._cleanup_images(draft)
 
-            from content.digest_store import log_published
+            from content.digest_store import log_published, update_candidate_status
+            for cid in draft.candidate_ids:
+                update_candidate_status(cid, "published")
             feedback_id = log_published(draft.rubric, draft.source_name, draft.title)
             self._send_reaction_prompt(chat_id, feedback_id)  # НЕ самоудаляется — реагировать можно в любой момент
 
@@ -474,6 +476,10 @@ class ModerationBot:
             for pid in self.photo_messages.pop(draft_id, []):
                 self._delete_message(chat_id, pid)
             self._cleanup_images(draft)
+            if draft.candidate_ids:
+                from content.digest_store import update_candidate_status
+                for cid in draft.candidate_ids:
+                    update_candidate_status(cid, "dropped")
             del self.pending[draft_id]
             self._removed_draft_ids.add(draft_id)
             self._save_state()

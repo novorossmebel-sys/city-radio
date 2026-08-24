@@ -40,13 +40,14 @@ HUMOR_SELECT_PROMPT = """Ты выбираешь ОДИН лучший пост 
 Список пронумерован. Ответ — ТОЛЬКО валидный JSON: {"pick": null или номер пункта (int)}"""
 
 
-def _draft_from_dict(d: dict) -> Draft:
+def _draft_from_dict(d: dict, candidate_ids: list | None = None) -> Draft:
     return Draft(
         rubric=d["rubric"], source_name=d["source_name"], source_url=d.get("url", ""),
         original_title=d.get("raw_title", ""), original_text=d.get("raw_text", ""),
         title=d["title"], body=d["body"], concerns=d.get("concerns", []),
         needs_manual_review=bool(d.get("needs_manual_review", False)),
         image_paths=d.get("image_paths", []),
+        candidate_ids=candidate_ids or [],
     )
 
 
@@ -125,7 +126,7 @@ def _dispatch_digest(header: str, items: list[tuple[dict, list[int]]], slot: str
 
     bot.send_text(bot.owner_chat_id, f"{header} — {len(items)} материал(ов)")
     for draft_source, ids in items:
-        draft = _draft_from_dict(draft_source)
+        draft = _draft_from_dict(draft_source, candidate_ids=ids)
         bot.send_draft(draft)
         for cid in ids:
             update_candidate_status(cid, "sent_moderation", digest_slot=slot)
