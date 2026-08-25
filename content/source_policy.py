@@ -98,3 +98,27 @@ ENGAGEMENT_KEYWORDS = (
 def matches_any(text: str, keywords: tuple[str, ...]) -> bool:
     lowered = text.lower()
     return any(kw in lowered for kw in keywords)
+
+
+# --- Рубрика по содержанию, а не только по каналу-источнику ---
+#
+# sources.yaml жёстко привязывает "Норд-ост и погода" к единственному источнику —
+# nvrskadm (официальный канал администрации). Но этот канал публикует далеко не только
+# штормовые предупреждения — рейды полиции, подготовку к отопительному сезону, вообще
+# всё, чем занимается администрация. Без переопределения такие посты всё равно выходили
+# бы под шапкой "Норд-ост и погода", что явно вводит читателя в заблуждение (замечено
+# владельцем 2026-08-25: рейд «Правопорядок» и совещание Минстроя пришли под этой
+# рубрикой). Переопределяем рубрику по primary_type из LLM-классификации, только для
+# этого канала — остальные каналы уже тематически однородны, трогать их не нужно.
+NVRSKADM_RUBRIC_BY_TYPE = {
+    "LOCAL_ALERT": "Норд-ост и погода",
+    "LOCAL_UTILITY": "Вода, свет и ЖКХ",
+    "LOCAL_STATUS": "Вода, свет и ЖКХ",
+}
+NVRSKADM_DEFAULT_RUBRIC = "Новороссийск сегодня"
+
+
+def resolve_rubric(default_rubric: str, channel: str, primary_type: str) -> str:
+    if channel.lstrip("@") == "nvrskadm":
+        return NVRSKADM_RUBRIC_BY_TYPE.get(primary_type, NVRSKADM_DEFAULT_RUBRIC)
+    return default_rubric

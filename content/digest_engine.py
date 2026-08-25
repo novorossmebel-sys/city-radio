@@ -31,7 +31,7 @@ from content.news import (
 )
 from content.source_policy import (
     role_for, HUMOR_ONLY_CHANNELS, HEALTH_CLAIM_SOURCE, HEALTH_CLAIM_TRIGGERS,
-    AD_KEYWORDS, SELF_PROMO_KEYWORDS, ENGAGEMENT_KEYWORDS, matches_any,
+    AD_KEYWORDS, SELF_PROMO_KEYWORDS, ENGAGEMENT_KEYWORDS, matches_any, resolve_rubric,
 )
 from content.tmdb import fetch_poster
 
@@ -389,6 +389,8 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
         print(f"[digest_engine] дроп @{channel}: реклама (LLM-классификация)")
         _cleanup_item_images(item)
         return
+
+    rubric = resolve_rubric(rubric, channel, data["primary_type"])
 
     entity, event_type = data.get("entity", ""), data.get("event_type", data["primary_type"])
     location, action = data.get("location", ""), data.get("action", "")
