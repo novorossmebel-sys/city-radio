@@ -9,9 +9,17 @@ Weekly (пятница). Кандидатов поставляет content/diges
 "Правило пустого выпуска" (раздел 20): если кандидатов меньше квоты слота — слот просто
 не заполняется слабым контентом, вплоть до нуля материалов во всём выпуске.
 """
-from content.base import Draft
-from content.digest_store import fetch_pool, fetch_candidates, update_candidate_status
+from content.base import draft_from_candidate_dict as _draft_from_dict
+from content.digest_store import (
+    fetch_pool, fetch_candidates, update_candidate_status, create_digest_queue,
+)
 from content.llm import call_yandexgpt, extract_json
+
+# Последовательная модерация (2026-08-25, по просьбе владельца): вечерний и недельный
+# дайджест шлют по одной карточке за раз (следующая — только после approve/reject с
+# задержкой, см. moderation.py::QUEUE_ADVANCE_DELAY), а не всё разом, как раньше. Утренний
+# дайджест — обычно 2-5 материалов, читается за пару минут целиком, там это не нужно.
+SEQUENTIAL_SLOTS = {"evening", "weekly"}
 
 LOCAL_TYPES = {"LOCAL_ALERT", "LOCAL_STATUS", "LOCAL_UTILITY", "LOCAL_EVENT"}
 GENERAL_TYPES = {"GENERAL_NEWS", "NEWS_UPDATE"}
@@ -38,17 +46,6 @@ HUMOR_SELECT_PROMPT = """Ты выбираешь ОДИН лучший пост 
 - Если ни один пункт не подходит — верни null, не публикуй слабое ради галочки.
 
 Список пронумерован. Ответ — ТОЛЬКО валидный JSON: {"pick": null или номер пункта (int)}"""
-
-
-def _draft_from_dict(d: dict, candidate_ids: list | None = None) -> Draft:
-    return Draft(
-        rubric=d["rubric"], source_name=d["source_name"], source_url=d.get("url", ""),
-        original_title=d.get("raw_title", ""), original_text=d.get("raw_text", ""),
-        title=d["title"], body=d["body"], concerns=d.get("concerns", []),
-        needs_manual_review=bool(d.get("needs_manual_review", False)),
-        image_paths=d.get("image_paths", []),
-        candidate_ids=candidate_ids or [],
-    )
 
 
 def _pick_top(pool: list[dict], used_ids: set, n: int, predicate=None) -> list[dict]:
@@ -125,6 +122,16 @@ def _dispatch_digest(header: str, items: list[tuple[dict, list[int]]], slot: str
         return
 
     bot.send_text(bot.owner_chat_id, f"{header} — {len(items)} материал(ов)")
+
+    if slot in SEQUENTIAL_SLOTS:
+        # По одной карточке за раз — следующая уходит из moderation.py после того, как
+        # владелец одобрит/отклонит текущую (плюс пауза, см. QUEUE_ADVANCE_DELAY там же).
+        queue_items = [{"draft": draft_source, "candidate_ids": ids} for draft_source, ids in items]
+        queue_id = create_digest_queue(slot, queue_items)
+        bot.send_next_queued(queue_id)
+        print(f"[digest_compose] «{header}»: {len(items)} материал(ов) поставлено в очередь, отправлен первый")
+        return
+
     for draft_source, ids in items:
         draft = _draft_from_dict(draft_source, candidate_ids=ids)
         bot.send_draft(draft)
@@ -135,8 +142,20 @@ def _dispatch_digest(header: str, items: list[tuple[dict, list[int]]], slot: str
 
 def compose_morning_radar() -> None:
     """06:30 — раздел 19: 2 local practical / 1 major general / 1 watchlist-кино /
-    1 "сегодня следим". Целевое чтение 2-3 минуты — поэтому квоты маленькие."""
-    pool = fetch_pool("DIGEST")
+    1 "сегодня следим". Целевое чтение 2-3 минуты — поэтому квоты маленькие.
+
+    2026-08-25: живые цифры показали, что пул DIGEST (score>=70) сам по себе почти всегда
+    даёт 0-1 кандидата на утро (за первую неделю работы только 25 из 607 оценённых
+    кандидатов вообще перешагнули порог 70) — владелец жаловался ровно на это, дайджест
+    из одной новости. Порог не занижаем (общий для DIGEST/WEEKLY, снижать — терять контроль
+    качества по всей системе), а расширяем ИСТОЧНИК конкретно для утреннего выпуска: если
+    слоту не хватает кандидатов из DIGEST, добираем из WEEKLY (score 60-69 — тоже прошли
+    pre-filter и LLM-оценку, просто не дотянули до вечернего порога, не мусор). WEEKLY-пул
+    идёт в списке ПОСЛЕ всех DIGEST (fetch_pool сортирует по score), поэтому более сильные
+    DIGEST-кандидаты всегда выбираются первыми — WEEKLY только докидывает недостающее.
+    Использованный здесь WEEKLY-кандидат помечается sent_moderation и поэтому не задвоится
+    в пятничном обзоре (fetch_pool("WEEKLY") тоже фильтрует по статусу)."""
+    pool = fetch_pool("DIGEST") + fetch_pool("WEEKLY")
     used_ids: set = set()
     items: list[tuple[dict, list[int]]] = []
 

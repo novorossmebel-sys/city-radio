@@ -101,6 +101,22 @@ def init_db() -> None:
             )
         """)
 
+        # Последовательная модерация вечернего/недельного дайджеста (2026-08-25, по просьбе
+        # владельца): вместо того чтобы слать все карточки выпуска разом, digest_compose.py
+        # кладёт их сюда одним списком и шлёт только первую; после approve/reject
+        # moderation.py присылает следующую с задержкой (см. QUEUE_ADVANCE_DELAY там же).
+        # Каждый процесс (планировщик и бот-модератор) — отдельный процесс, поэтому очередь
+        # не может жить в памяти одного из них — нужен тот же общий SQLite, что и для candidates.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS digest_queues (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slot TEXT NOT NULL,
+                items_json TEXT NOT NULL,
+                cursor INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+        """)
+
         # Личный обучающий слой (последний раздел политики владельца, 2026-08-19) — реакции
         # 👍/🔥/👎/♻️ на карточке модерации ПОСЛЕ публикации. Пока только сбор сырых данных:
         # автоматическая перестройка весов рубрик/источников по ним — отдельная будущая работа,
@@ -271,6 +287,34 @@ def is_in_cooldown(event_key: str, primary_type: str) -> bool:
     hours = COOLDOWN_HOURS.get(primary_type, COOLDOWN_HOURS["default"])
     last_published = datetime.fromisoformat(event["last_published_at"])
     return datetime.now() < last_published + timedelta(hours=hours)
+
+
+# --- digest_queues (последовательная модерация вечернего/недельного дайджеста) ---
+
+def create_digest_queue(slot: str, items: list[dict]) -> int:
+    """items — [{"draft": <словарь кандидата для draft_from_candidate_dict>,
+    "candidate_ids": [...]}] в том порядке, в котором их нужно присылать."""
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO digest_queues (slot, items_json, cursor, created_at) VALUES (?, ?, 0, ?)",
+            (slot, json.dumps(items, ensure_ascii=False), _now()),
+        )
+        return cur.lastrowid
+
+
+def get_digest_queue(queue_id: int) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM digest_queues WHERE id = ?", (queue_id,)).fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    d["items"] = json.loads(d["items_json"])
+    return d
+
+
+def advance_digest_queue(queue_id: int) -> None:
+    with _connect() as conn:
+        conn.execute("UPDATE digest_queues SET cursor = cursor + 1 WHERE id = ?", (queue_id,))
 
 
 # --- feedback (личный обучающий слой) ---

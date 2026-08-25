@@ -46,6 +46,10 @@ class Draft:
     # обычно один, но синтез из нескольких мнений (кино, digest_compose.py) даёт несколько;
     # moderation.py по ним обновляет статус после решения владельца (было: навсегда
     # "sent_moderation", см. обсуждение 2026-08-19/25)
+    queue_id: Optional[int] = None  # id очереди в digest_store.digest_queues, если черновик —
+    # часть последовательной модерации вечернего/недельного дайджеста (2026-08-25): не None
+    # значит после approve/reject moderation.py должен через паузу прислать следующий пункт
+    # этой очереди, а не всё сразу (см. content/digest_compose.py::_dispatch_digest)
 
     def to_post(self) -> Post:
         parts = [f"📻 {self.rubric}", "", f"<b>{self.title}</b>", "", self.body]
@@ -53,3 +57,18 @@ class Draft:
             parts += ["", f"<a href=\"{self.source_url}\">Источник: {self.source_name}</a>"]
         images = self.image_paths if (self.include_photo and self.image_paths) else []
         return Post(text="\n".join(parts), image_paths=images)
+
+
+def draft_from_candidate_dict(d: dict, candidate_ids: list | None = None) -> Draft:
+    """Собирает Draft из словаря кандидата digest_store (или синтезированного кино-вердикта,
+    content/digest_compose.py::_synthesize_cinema_verdict) — общее место для digest_compose.py
+    (обычная сборка выпуска) и moderation.py (последовательная отправка следующего пункта
+    очереди), чтобы не дублировать одну и ту же сборку в двух модулях."""
+    return Draft(
+        rubric=d["rubric"], source_name=d["source_name"], source_url=d.get("url", ""),
+        original_title=d.get("raw_title", ""), original_text=d.get("raw_text", ""),
+        title=d["title"], body=d["body"], concerns=d.get("concerns", []),
+        needs_manual_review=bool(d.get("needs_manual_review", False)),
+        image_paths=d.get("image_paths", []),
+        candidate_ids=candidate_ids or [],
+    )

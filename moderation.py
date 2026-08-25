@@ -29,6 +29,7 @@
 import json
 import mimetypes
 import random
+import threading
 import time
 import uuid
 from dataclasses import asdict
@@ -37,13 +38,18 @@ from pathlib import Path
 import requests
 
 from config import settings, load_cities
-from content.base import Draft, TELEGRAM_CAPTION_LIMIT
+from content.base import Draft, TELEGRAM_CAPTION_LIMIT, draft_from_candidate_dict
 from publishers.telegram import TelegramPublisher
 from publishers.max import MaxPublisher
 
 PUBLISH_DELAY_RANGE = (30, 40)  # секунды между публикацией в MAX и в Telegram
 STATUS_MESSAGE_TTL = 10  # секунд до удаления "Публикую…" после факта (сообщение с реакциями не удаляется)
 STATE_FILE = Path("moderation_state.json")
+QUEUE_ADVANCE_DELAY = 120  # секунд между решением по карточке и следующей из очереди
+# дайджеста (2026-08-25, по просьбе владельца — вечерний/недельный выпуск раньше слался
+# весь разом; см. content/digest_compose.py::SEQUENTIAL_SLOTS). Таймер в отдельном потоке,
+# а не time.sleep() в основном цикле — иначе бот 2 минуты не отвечал бы вообще ни на что
+# другое (например, на кнопку у не связанного с очередью NOW-алерта).
 
 
 def _format_draft_message(draft: Draft) -> str:
@@ -297,6 +303,25 @@ class ModerationBot:
                     print(f"[moderation] черновик {draft_id} так и не удалось доставить владельцу")
         return draft_id
 
+    def send_next_queued(self, queue_id: int) -> None:
+        """Шлёт следующую по очереди карточку вечернего/недельного дайджеста (см.
+        content/digest_compose.py::SEQUENTIAL_SLOTS). Вызывается один раз сразу при
+        сборке выпуска (первый пункт) и затем из _handle_callback через таймер после
+        каждого approve/reject (см. QUEUE_ADVANCE_DELAY) — если очередь уже пуста,
+        просто ничего не делает."""
+        from content.digest_store import get_digest_queue, advance_digest_queue, update_candidate_status
+        queue = get_digest_queue(queue_id)
+        if queue is None or queue["cursor"] >= len(queue["items"]):
+            return
+
+        item = queue["items"][queue["cursor"]]
+        draft = draft_from_candidate_dict(item["draft"], candidate_ids=item["candidate_ids"])
+        draft.queue_id = queue_id
+        self.send_draft(draft)
+        for cid in item["candidate_ids"]:
+            update_candidate_status(cid, "sent_moderation", digest_slot=queue["slot"])
+        advance_digest_queue(queue_id)
+
     def _publish_draft(self, draft: Draft) -> bool:
         """Публикует в MAX и Telegram. Оба паблишера сами не бросают исключений при
         сетевых сбоях (см. publishers/telegram.py, publishers/max.py) — просто отдают
@@ -466,6 +491,9 @@ class ModerationBot:
             from content.rotation import record_resolved
             record_resolved(draft.rubric)
 
+            if draft.queue_id is not None:
+                threading.Timer(QUEUE_ADVANCE_DELAY, self.send_next_queued, args=(draft.queue_id,)).start()
+
             # "Публикую…" своё дело сделал — недолго повисит, чтобы владелец успел увидеть,
             # и само удалится (в отличие от сообщения с реакциями выше)
             time.sleep(STATUS_MESSAGE_TTL)
@@ -483,6 +511,8 @@ class ModerationBot:
             del self.pending[draft_id]
             self._removed_draft_ids.add(draft_id)
             self._save_state()
+            if draft.queue_id is not None:
+                threading.Timer(QUEUE_ADVANCE_DELAY, self.send_next_queued, args=(draft.queue_id,)).start()
             self._handle_reject_followup(draft)
         elif action == "edit":
             self._delete_message(chat_id, cq["message"]["message_id"])

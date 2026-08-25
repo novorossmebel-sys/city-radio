@@ -14,6 +14,7 @@ from config import load_cities
 from engine import post_module
 from content.digest_engine import collect_candidates
 from content.digest_compose import compose_morning_radar, compose_evening_digest, compose_weekly, select_humor
+from content.news import post_horoscope
 
 # Программа дня (МСК): (час, минута, модуль)
 PROGRAM = [
@@ -73,6 +74,7 @@ def start() -> None:
     sched.add_job(_safe(collect_candidates), "interval", minutes=NORMAL_POLL_MINUTES,
                   jitter=600, args=[False], id="digest-collect-normal")
     sched.add_job(_safe(compose_morning_radar), "cron", hour=6, minute=30, id="digest-morning")
+    sched.add_job(_safe(post_horoscope), "cron", hour=7, minute=0, id="horoscope-daily")
     sched.add_job(_safe(select_humor), "cron", hour=18, minute=0, id="digest-humor-select")
     sched.add_job(_safe(compose_evening_digest), "cron", hour=19, minute=0, id="digest-evening")
     sched.add_job(_safe(compose_weekly), "cron", day_of_week="fri", hour=12, minute=0, id="digest-weekly")
