@@ -59,40 +59,54 @@ PRIMARY_TYPES = (
     "HEALTH_CLAIM", "ANALYSIS", "DISCOVERY", "HUMOR",
 )
 
+# Классификация — на КАЖДЫЙ пост, прошедший pre-filter (33 канала, десятки постов в день,
+# 76% в итоге уходят в ARCHIVE и никогда не показываются читателю, см. обсуждение 2026-08-25).
+# Поэтому здесь сознательно НЕТ рерайта (title/body) — только компактная оценка, дешёвый
+# вызов с маленьким maxTokens (см. CLASSIFY_MAX_TOKENS). Полный пересказ (дорогой, с двумя
+# абзацами текста на выходе) делает отдельный DIGEST_REWRITE_SYSTEM_PROMPT ниже, и только
+# для того, что реально прошло отбор (NOW/DIGEST/WEEKLY) — было наоборот (рерайт на всё
+# подряд ДО решения о публикации), из-за чего 4/5 стоимости уходило на пересказ того, что
+# никто не увидит.
 DIGEST_CLASSIFY_SYSTEM_PROMPT = f"""Ты — редактор-аналитик городского Telegram-канала «City Radio»
-(Новороссийск). Тебе присылают сырой пост из источника и рубрику. Нужно не просто переписать
-пост, а извлечь структурированные данные для системы, которая решает — стоит ли это вообще
-публиковать (владелец канала прямо просил не показывать читателю то, что не меняет его картину
-происходящего).
+(Новороссийск). Тебе присылают сырой пост из источника и рубрику. Нужно извлечь структурированные
+данные для системы, которая решает — стоит ли это вообще публиковать (владелец канала прямо
+просил не показывать читателю то, что не меняет его картину происходящего). Полный пересказ
+текста делать НЕ нужно — это отдельный шаг, только для постов, которые реально пройдут отбор.
 
-1. Рерайт (title/body): не меняй суть, не выдумывай деталей, перескажи ПОЛНОСТЬЮ своими словами,
-   стиль мессенджера. HTML-разметка допустима только <b>/<i>.
-2. is_advertisement — призыв купить/заказать/перейти по реферальной ссылке (не путать с новостью
+1. is_advertisement — призыв купить/заказать/перейти по реферальной ссылке (не путать с новостью
    О рекламе/бизнесе). needs_manual_review — если текст непонятен, вырван из контекста, или
    рубрика про происшествия/здоровье и в тексте только слухи/один неофициальный источник.
-3. primary_type — ровно один из: {", ".join(PRIMARY_TYPES)}.
-4. event_type — короткий ярлык события в SCREAMING_SNAKE_CASE, конкретнее чем primary_type
+2. primary_type — ровно один из: {", ".join(PRIMARY_TYPES)}.
+3. event_type — короткий ярлык события в SCREAMING_SNAKE_CASE, конкретнее чем primary_type
    (например BPLA_ALERT, WATER_OUTAGE, CINEMA_RELEASE_DATE, RESTAURANT_OPENING).
-5. entity — главная сущность события (город/район, название фильма, тема), location — где
+4. entity — главная сущность события (город/район, название фильма, тема), location — где
    происходит (пусто, если неприменимо), action — суть происходящего в 2-4 словах.
-6. importance (0-25): 0-5 курьёз, 6-10 небольшой факт, 11-15 заметное событие, 16-20 важное
+5. importance (0-25): 0-5 курьёз, 6-10 небольшой факт, 11-15 заметное событие, 16-20 важное
    изменение, 21-25 крупное событие.
-7. relevance (0-25): Новороссийск 20-25, кино/еда по качеству 10-20, случайное событие другого
+6. relevance (0-25): Новороссийск 20-25, кино/еда по качеству 10-20, случайное событие другого
    региона 0-8.
-8. actionability (0-10): насколько читателю нужно/можно среагировать сейчас (тревога, отключение
+7. actionability (0-10): насколько читателю нужно/можно среагировать сейчас (тревога, отключение
    воды, ограничение — высоко; отвлечённая новость — низко).
-9. discovery (0-5): открывает ли читателю что-то новое/полезное (гастро-находка, лайфхак).
-10. time_sensitive — true, если промедление с публикацией обесценивает новость (тревога,
+8. discovery (0-5): открывает ли читателю что-то новое/полезное (гастро-находка, лайфхак).
+9. time_sensitive — true, если промедление с публикацией обесценивает новость (тревога,
     отключение, событие сегодня/на этой неделе).
-11. Флаги (bool): clickbait — заголовок обещает больше, чем даёт текст; poster_no_new_facts —
+10. Флаги (bool): clickbait — заголовок обещает больше, чем даёт текст; poster_no_new_facts —
     кино-пост это просто новый постер/кадр/пятый тизер без даты/рейтинга/трейлера/кастинга/
     статуса; opinion_no_new_thought — мнение повторяет уже сказанное, не добавляет мысли.
 
 Ответ — ТОЛЬКО валидный JSON, без markdown-обёртки, строго по схеме:
-{{"title": "...", "body": "...", "is_advertisement": false, "needs_manual_review": false,
+{{"is_advertisement": false, "needs_manual_review": false,
 "primary_type": "...", "event_type": "...", "entity": "...", "location": "...", "action": "...",
 "importance": 0, "relevance": 0, "actionability": 0, "discovery": 0, "time_sensitive": false,
 "clickbait": false, "poster_no_new_facts": false, "opinion_no_new_thought": false}}"""
+CLASSIFY_MAX_TOKENS = 500  # только цифры/короткие поля — рерайта в ответе больше нет
+
+DIGEST_REWRITE_SYSTEM_PROMPT = """Ты — редактор городского Telegram-канала «City Radio»
+(Новороссийск). Пост уже прошёл отбор и точно будет показан читателю — перепиши его: не меняй
+суть, не выдумывай деталей, перескажи ПОЛНОСТЬЮ своими словами, стиль мессенджера. HTML-разметка
+допустима только <b>/<i>.
+
+Ответ — ТОЛЬКО валидный JSON, без markdown-обёртки, строго по схеме: {"title": "...", "body": "..."}"""
 
 NOVELTY_SYSTEM_PROMPT = """Ты сравниваешь новый пост с уже известными фактами по тому же
 сюжету и оцениваешь, насколько он меняет картину для читателя, который уже видел известные факты.
@@ -267,7 +281,7 @@ def _classify(rubric: str, channel: str, item: RawItem) -> dict | None:
         f"Заголовок источника: {item.title}\nТекст источника:\n{item.text}"
     )
     try:
-        raw = call_yandexgpt(DIGEST_CLASSIFY_SYSTEM_PROMPT, user_content)
+        raw = call_yandexgpt(DIGEST_CLASSIFY_SYSTEM_PROMPT, user_content, max_tokens=CLASSIFY_MAX_TOKENS)
         data = extract_json(raw)
     except Exception as e:
         print(f"[digest_engine] классификация не удалась для @{channel}: {e}")
@@ -275,6 +289,21 @@ def _classify(rubric: str, channel: str, item: RawItem) -> dict | None:
     if data.get("primary_type") not in PRIMARY_TYPES:
         data["primary_type"] = "GENERAL_NEWS"
     return data
+
+
+def _rewrite(rubric: str, channel: str, item: RawItem) -> dict | None:
+    """Полный пересказ (title/body) — только для того, что уже прошло отбор (route в
+    NOW/DIGEST/WEEKLY), см. комментарий у DIGEST_CLASSIFY_SYSTEM_PROMPT."""
+    user_content = (
+        f"Рубрика: {rubric}\nКанал-источник: @{channel}\n"
+        f"Заголовок источника: {item.title}\nТекст источника:\n{item.text}"
+    )
+    try:
+        raw = call_yandexgpt(DIGEST_REWRITE_SYSTEM_PROMPT, user_content)
+        return extract_json(raw)
+    except Exception as e:
+        print(f"[digest_engine] рерайт не удался для @{channel}: {e}")
+        return None
 
 
 def _assess_novelty(known_facts: list, new_text: str) -> int:
@@ -458,6 +487,23 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
         print(f"[digest_engine] дроп @{channel}: score={total_score}<45")
         _cleanup_item_images(item)
         return
+
+    if route in ("NOW", "DIGEST", "WEEKLY"):
+        # Полный пересказ — только теперь, когда точно известно, что пост дойдёт до читателя
+        # (см. DIGEST_CLASSIFY_SYSTEM_PROMPT/DIGEST_REWRITE_SYSTEM_PROMPT выше).
+        rewritten = _rewrite(rubric, channel, item)
+        if rewritten is None:
+            print(f"[digest_engine] дроп @{channel}: рерайт не удался")
+            _cleanup_item_images(item)
+            return
+        data["title"] = rewritten.get("title", item.title)
+        data["body"] = rewritten.get("body", item.text)
+    else:
+        # ARCHIVE никогда не показывается читателю — дорогой пересказ не нужен, оставляем
+        # исходный текст (пригодится, если понадобится вручную посмотреть архив при калибровке
+        # порогов).
+        data["title"] = item.title
+        data["body"] = item.text
 
     if event_key and route in ("NOW", "DIGEST", "WEEKLY"):
         # "Опубликовано" здесь = "отобрано в пул, который читатель вот-вот увидит" — точный

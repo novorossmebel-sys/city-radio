@@ -12,10 +12,10 @@ YANDEX_COMPLETION_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/co
 YANDEX_MODEL = "yandexgpt/latest"  # дешевле: "yandexgpt-lite/latest" — но хуже держит нюансы
 
 
-def call_yandexgpt(system_prompt: str, user_content: str) -> str:
+def call_yandexgpt(system_prompt: str, user_content: str, max_tokens: int = 2000) -> str:
     payload = {
         "modelUri": f"gpt://{settings.YANDEX_FOLDER_ID}/{YANDEX_MODEL}",
-        "completionOptions": {"stream": False, "temperature": 0.3, "maxTokens": "2000"},
+        "completionOptions": {"stream": False, "temperature": 0.3, "maxTokens": str(max_tokens)},
         "messages": [
             {"role": "system", "text": system_prompt},
             {"role": "user", "text": user_content},
