@@ -334,11 +334,8 @@ def _route_for(primary_type: str, total_score: int, time_sensitive: bool, status
 
 
 def _build_draft_for_now(rubric: str, channel: str, item: RawItem, data: dict, candidate_id: int) -> Draft:
-    image_paths = item.image_paths
-    if channel in DANGER_SOURCE_CHANNELS:
-        matched = _danger_photo_for(f"{item.title} {item.text}")
-        if matched:
-            image_paths = matched
+    # Подстановка danger-фото и YandexART-фоллбэк уже сделаны в _process_item (общая для
+    # NOW/DIGEST/WEEKLY ветка) — item.image_paths здесь уже финальный.
     return Draft(
         rubric=rubric,
         source_name=item.source_label,
@@ -349,7 +346,7 @@ def _build_draft_for_now(rubric: str, channel: str, item: RawItem, data: dict, c
         body=data["body"],
         concerns=[],
         needs_manual_review=data.get("needs_manual_review", False),
-        image_paths=_ensure_image(rubric, data["title"], data["body"], image_paths),
+        image_paths=item.image_paths,
         candidate_ids=[candidate_id],
     )
 
@@ -498,6 +495,18 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
             return
         data["title"] = rewritten.get("title", item.title)
         data["body"] = rewritten.get("body", item.text)
+
+        # Раньше подстановка danger-фото и YandexART-фоллбэк (см. content/news.py) были
+        # реализованы только для NOW-черновика (_build_draft_for_now) — DIGEST/WEEKLY
+        # (основной объём реального контента) их вообще не получали, посты без своего фото
+        # уходили в модерацию совсем без картинки. Перенесено сюда, в общую ветку — работает
+        # одинаково для всех трёх маршрутов, ARCHIVE/DROP по-прежнему не тратят на это ни
+        # копейки (см. else-ветку ниже и ранний return на DROP).
+        if channel in DANGER_SOURCE_CHANNELS:
+            matched = _danger_photo_for(f"{item.title} {item.text}")
+            if matched:
+                item.image_paths = matched
+        item.image_paths = _ensure_image(rubric, data["title"], data["body"], item.image_paths)
     else:
         # ARCHIVE никогда не показывается читателю — дорогой пересказ не нужен, оставляем
         # исходный текст (пригодится, если понадобится вручную посмотреть архив при калибровке
