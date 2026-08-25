@@ -348,7 +348,7 @@ def _build_draft_for_now(rubric: str, channel: str, item: RawItem, data: dict, c
         original_text=item.text,
         title=data["title"],
         body=data["body"],
-        concerns=[],
+        concerns=data.get("concerns", []),
         needs_manual_review=data.get("needs_manual_review", False),
         image_paths=item.image_paths,
         candidate_ids=[candidate_id],
@@ -366,6 +366,39 @@ def _cleanup_item_images(item: RawItem) -> None:
             Path(path).unlink(missing_ok=True)
         except Exception as e:
             print(f"[digest_engine] не смог удалить {path}: {e}")
+
+
+def _handle_classification_failure(rubric: str, channel: str, item: RawItem) -> None:
+    """Классификация целиком отказала (обычно — фильтр безопасности модели, см. комментарий
+    у места вызова) на алертном канале — LLM здесь больше не участвует вообще, чтобы не
+    отказать повторно: фото — та же логика, что и в обычном пути (danger-фото по ключевым
+    словам в исходном тексте, затем YandexART-фоллбэк), текст — исходный, без пересказа."""
+    matched = _danger_photo_for(f"{item.title} {item.text}")
+    if matched:
+        _cleanup_item_images(item)
+        item.image_paths = matched
+    item.image_paths = _ensure_image(rubric, item.title, item.text, item.image_paths)
+
+    candidate_id = insert_candidate(
+        source_channel=channel, rubric=rubric, raw_title=item.title, raw_text=item.text,
+        url=item.url, image_paths=item.image_paths, primary_type="LOCAL_ALERT",
+        event_key=None, title=item.title, body=item.text,
+        concerns=["⚠ не удалось обработать автоматически (вероятно, отказ модели) — прислано как есть"],
+        needs_manual_review=True, route="NOW", status="scored",
+    )
+    from moderation import ModerationBot  # локальный импорт — как и в остальных вызовах здесь
+    bot = ModerationBot()
+    if not (bot.token and bot.owner_chat_id):
+        return
+    draft = Draft(
+        rubric=rubric, source_name=item.source_label, source_url=item.url,
+        original_title=item.title, original_text=item.text,
+        title=item.title, body=item.text,
+        concerns=["⚠ не удалось обработать автоматически (вероятно, отказ модели) — прислано как есть"],
+        needs_manual_review=True, image_paths=item.image_paths, candidate_ids=[candidate_id],
+    )
+    bot.send_draft(draft)
+    update_candidate_status(candidate_id, "sent_moderation", digest_slot="now")
 
 
 def _process_item(rubric: str, channel: str, item: RawItem) -> None:
@@ -413,8 +446,15 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
 
     data = _classify(rubric, channel, item)
     if data is None:
-        _cleanup_item_images(item)
-        return  # сбой LLM — уже залогирован в _classify, не роняем весь опрос
+        # сбой LLM — уже залогирован в _classify. Для алертных каналов (2026-08-25: 47 отказов
+        # модели за 2 суток, 15/13 из них именно на chpnvrsk_official/nvrskadm — вероятно,
+        # встроенный фильтр безопасности на темах вроде дефицита топлива) молча дропать
+        # нельзя — там могут быть настоящие тревоги. Шлём как есть на ручную проверку.
+        if channel in DANGER_SOURCE_CHANNELS:
+            _handle_classification_failure(rubric, channel, item)
+        else:
+            _cleanup_item_images(item)
+        return
     if data.get("is_advertisement"):
         print(f"[digest_engine] дроп @{channel}: реклама (LLM-классификация)")
         _cleanup_item_images(item)
@@ -494,11 +534,21 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
         # (см. DIGEST_CLASSIFY_SYSTEM_PROMPT/DIGEST_REWRITE_SYSTEM_PROMPT выше).
         rewritten = _rewrite(rubric, channel, item)
         if rewritten is None:
-            print(f"[digest_engine] дроп @{channel}: рерайт не удался")
-            _cleanup_item_images(item)
-            return
-        data["title"] = rewritten.get("title", item.title)
-        data["body"] = rewritten.get("body", item.text)
+            if channel in DANGER_SOURCE_CHANNELS:
+                # Классификация уже прошла (маршрут известен) — отказал именно пересказ.
+                # Не дропаем: показываем исходный текст без обработки, помечаем для владельца.
+                print(f"[digest_engine] @{channel}: рерайт не удался, шлю как есть на ручную проверку")
+                data["title"] = item.title
+                data["body"] = item.text
+                data["needs_manual_review"] = True
+                data["concerns"] = ["⚠ рерайт не удался (вероятно, отказ модели) — показан исходный текст"]
+            else:
+                print(f"[digest_engine] дроп @{channel}: рерайт не удался")
+                _cleanup_item_images(item)
+                return
+        else:
+            data["title"] = rewritten.get("title", item.title)
+            data["body"] = rewritten.get("body", item.text)
 
         # Раньше подстановка danger-фото и YandexART-фоллбэк (см. content/news.py) были
         # реализованы только для NOW-черновика (_build_draft_for_now) — DIGEST/WEEKLY
@@ -531,6 +581,7 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
         source_channel=channel, rubric=rubric, raw_title=item.title, raw_text=item.text,
         url=item.url, image_paths=item.image_paths, primary_type=data["primary_type"],
         event_key=event_key, title=data["title"], body=data["body"],
+        concerns=data.get("concerns", []),
         needs_manual_review=data.get("needs_manual_review", False),
         is_advertisement=False, importance=importance, relevance=relevance, novelty=novelty_score,
         reliability=reliability, actionability=actionability, discovery=discovery,
