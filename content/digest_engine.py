@@ -255,11 +255,15 @@ def _extract_message_id(url: str) -> int | None:
 def _fetch_new_items(channel: str, adapter, limit: int) -> list[RawItem]:
     """Фильтрует уже виденное по courser'у (актуально только для Telegram — у веб-источников
     типа афиши нет устойчивого id для курсора, там дедуп целиком на event_key)."""
-    items = adapter.fetch(limit=limit)
     if not isinstance(adapter, TelegramChannelSource):
-        return items
+        return adapter.fetch(limit=limit)
 
     cursor = get_cursor(channel)
+    # since_id прокинут в сам fetch() — без этого он скачивал фото для N последних постов
+    # НА КАЖДЫЙ опрос, даже если ни одного нового поста не было, а фильтр по курсору всё
+    # равно отбрасывал их здесь, ниже — картинки оставались на диске никем не удаляемые
+    # (нашли 2026-08-25: ~800 МБ мусора в media_cache/ за первые сутки на VPS).
+    items = adapter.fetch(limit=limit, since_id=cursor)
     fresh, max_id = [], cursor or 0
     for item in items:
         msg_id = _extract_message_id(item.url)
@@ -505,6 +509,7 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
         if channel in DANGER_SOURCE_CHANNELS:
             matched = _danger_photo_for(f"{item.title} {item.text}")
             if matched:
+                _cleanup_item_images(item)  # иначе скачанные фото источника остаются сиротами
                 item.image_paths = matched
         item.image_paths = _ensure_image(rubric, data["title"], data["body"], item.image_paths)
     else:

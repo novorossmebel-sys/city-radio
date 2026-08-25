@@ -257,7 +257,7 @@ class TelegramChannelSource:
                 print(f"[news] не смог скачать фото {msg.id} из @{self.channel_username}: {e}")
         return paths
 
-    def fetch(self, limit: int = 5) -> list:
+    def fetch(self, limit: int = 5, since_id: int | None = None) -> list:
         from telethon.sync import TelegramClient
 
         if not settings.TELETHON_API_ID or not settings.TELETHON_API_HASH:
@@ -276,12 +276,19 @@ class TelegramChannelSource:
             def flush(group_msgs):
                 if not group_msgs or len(items) >= limit:
                     return
+                anchor = group_msgs[0]
+                if since_id is not None and anchor.id <= since_id:
+                    # уже видели на прошлом опросе (см. digest_engine.py::_fetch_new_items,
+                    # курсор по каналу) — раньше фото всё равно скачивались здесь ДО фильтра
+                    # по курсору выше по стеку и тут же становились мусором в media_cache/,
+                    # никем не удаляемым (найдено 2026-08-25: ~800 МБ, 98% файлов там —
+                    # именно такие сироты). Пропускаем скачивание, даже не дойдя до него.
+                    return
                 text = next((m.message.strip() for m in group_msgs if m.message and m.message.strip()), "")
                 text = _strip_channel_footer(text)
                 if not text:
                     return
                 title = text.split("\n", 1)[0][:120]
-                anchor = group_msgs[0]
                 url = f"https://t.me/{self.channel_username}/{anchor.id}"
                 image_paths = self._download_photos(client, group_msgs)
                 items.append(RawItem(
