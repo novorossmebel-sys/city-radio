@@ -15,11 +15,14 @@ from content.digest_store import (
 )
 from content.llm import call_yandexgpt, extract_json
 
-# Последовательная модерация (2026-08-25, по просьбе владельца): вечерний и недельный
-# дайджест шлют по одной карточке за раз (следующая — только после approve/reject с
-# задержкой, см. moderation.py::QUEUE_ADVANCE_DELAY), а не всё разом, как раньше. Утренний
-# дайджест — обычно 2-5 материалов, читается за пару минут целиком, там это не нужно.
-SEQUENTIAL_SLOTS = {"evening", "weekly"}
+# Последовательная модерация (2026-08-25, по просьбе владельца; утренний дайджест
+# добавлен туда же 2026-08-27): все три плановых выпуска шлют по одной карточке за раз
+# (следующая — только после approve/reject с задержкой, см.
+# moderation.py::QUEUE_ADVANCE_DELAY), а не всё разом. Утренний дайджест изначально был
+# исключён как "обычно 2-5 материалов, читается за пару минут целиком" — но после
+# расширения его пула WEEKLY-кандидатами (см. compose_morning_radar) стал регулярно слать
+# несколько карточек одним залпом по утрам, что владелец и попросил исправить.
+SEQUENTIAL_SLOTS = {"morning", "evening", "weekly"}
 
 LOCAL_TYPES = {"LOCAL_ALERT", "LOCAL_STATUS", "LOCAL_UTILITY", "LOCAL_EVENT"}
 GENERAL_TYPES = {"GENERAL_NEWS", "NEWS_UPDATE"}
