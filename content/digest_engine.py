@@ -20,8 +20,8 @@ import yaml
 
 from content.base import Draft
 from content.digest_store import (
-    get_cursor, set_cursor, insert_candidate, update_candidate_status, get_event, upsert_event,
-    is_in_cooldown, mark_event_published,
+    get_cursor, set_cursor, insert_candidate, update_candidate_status, update_candidate_content,
+    get_event, upsert_event, is_in_cooldown, mark_event_published,
 )
 from content.llm import call_yandexgpt, extract_json
 from content.news import (
@@ -529,7 +529,19 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
         _cleanup_item_images(item)
         return
 
-    if route in ("NOW", "DIGEST", "WEEKLY"):
+    if route == "WEEKLY":
+        # Дорогой пересказ + YandexART-картинка для WEEKLY откладываются до момента, когда
+        # кандидат реально отбирается в выпуск (content/digest_compose.py::
+        # finalize_weekly_candidate) — пул набирает ~18-26 кандидатов/день, а пятничный
+        # обзор публикует максимум WEEKLY_MAX_ITEMS=12 ЗА ВСЮ НЕДЕЛЮ (плюс изредка пара
+        # штук как затычка для утреннего дайджеста). Обработка всех заранее означала
+        # платить YandexGPT+YandexART за контент, который в 90%+ случаев никто не увидит —
+        # это и держало счёт за Яндекс на ~500-600₽/день даже после classify/rewrite-фикса
+        # от 25.08 (владелец, 2026-08-31: "куда ушли деньги"), у которого этот путь остался
+        # незамеченным, потому что оба изменения вносились в один день.
+        data["title"] = item.title
+        data["body"] = item.text
+    elif route in ("NOW", "DIGEST"):
         # Полный пересказ — только теперь, когда точно известно, что пост дойдёт до читателя
         # (см. DIGEST_CLASSIFY_SYSTEM_PROMPT/DIGEST_REWRITE_SYSTEM_PROMPT выше).
         rewritten = _rewrite(rubric, channel, item)
@@ -551,11 +563,12 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
             data["body"] = rewritten.get("body", item.text)
 
         # Раньше подстановка danger-фото и YandexART-фоллбэк (см. content/news.py) были
-        # реализованы только для NOW-черновика (_build_draft_for_now) — DIGEST/WEEKLY
-        # (основной объём реального контента) их вообще не получали, посты без своего фото
-        # уходили в модерацию совсем без картинки. Перенесено сюда, в общую ветку — работает
-        # одинаково для всех трёх маршрутов, ARCHIVE/DROP по-прежнему не тратят на это ни
-        # копейки (см. else-ветку ниже и ранний return на DROP).
+        # реализованы только для NOW-черновика (_build_draft_for_now) — DIGEST (основной
+        # объём реального контента) их вообще не получал, посты без своего фото уходили в
+        # модерацию совсем без картинки. Перенесено сюда, в общую ветку NOW/DIGEST; WEEKLY
+        # получает то же самое отдельно и позже, см. finalize_weekly_candidate ниже.
+        # ARCHIVE/DROP по-прежнему не тратят на это ни копейки (см. else-ветку и ранний
+        # return на DROP).
         if channel in DANGER_SOURCE_CHANNELS:
             matched = _danger_photo_for(f"{item.title} {item.text}")
             if matched:
@@ -598,6 +611,42 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
             draft = _build_draft_for_now(rubric, channel, item, data, candidate_id)
             bot.send_draft(draft)
             update_candidate_status(candidate_id, "sent_moderation", digest_slot="now")
+
+
+def finalize_weekly_candidate(c: dict) -> dict:
+    """Догоняет отложенную обработку WEEKLY-кандидата (пересказ + фото, см. комментарий
+    у route == "WEEKLY" в _process_item выше) в момент, когда он реально отобран в
+    пятничный обзор или как утренняя затычка (content/digest_compose.py). Fail-open —
+    место в выпуске уже занято этим кандидатом, молча терять пункт из-за отказа модели
+    хуже, чем показать исходный текст с пометкой (как и для алертных каналов в
+    _process_item). Результат сохраняется в БД, чтобы не платить за обработку повторно."""
+    item = RawItem(
+        title=c["raw_title"], text=c["raw_text"], url=c.get("url", ""),
+        source_label=f"@{c['source_channel']}", image_paths=c.get("image_paths") or [],
+    )
+    rewritten = _rewrite(c["rubric"], c["source_channel"], item)
+    if rewritten is None:
+        print(f"[digest_engine] WEEKLY @{c['source_channel']}: рерайт не удался, показываю как есть")
+        title, body = item.title, item.text
+        needs_manual_review = True
+        concerns = ["⚠ рерайт не удался (вероятно, отказ модели) — показан исходный текст"]
+    else:
+        title = rewritten.get("title", item.title)
+        body = rewritten.get("body", item.text)
+        needs_manual_review = c.get("needs_manual_review", False)
+        concerns = c.get("concerns", [])
+
+    image_paths = item.image_paths
+    if c["source_channel"] in DANGER_SOURCE_CHANNELS:
+        matched = _danger_photo_for(f"{item.title} {item.text}")
+        if matched:
+            _cleanup_item_images(item)
+            image_paths = matched
+    image_paths = _ensure_image(c["rubric"], title, body, image_paths)
+
+    update_candidate_content(c["id"], title, body, image_paths, needs_manual_review, concerns)
+    return dict(c, title=title, body=body, image_paths=image_paths,
+                needs_manual_review=needs_manual_review, concerns=concerns)
 
 
 def collect_candidates(fast_only: bool = False) -> None:

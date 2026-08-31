@@ -189,6 +189,21 @@ def update_candidate_status(candidate_id: int, status: str, digest_slot: str | N
             conn.execute("UPDATE candidates SET status = ? WHERE id = ?", (status, candidate_id))
 
 
+def update_candidate_content(candidate_id: int, title: str, body: str, image_paths: list,
+                              needs_manual_review: bool = False, concerns: list | None = None) -> None:
+    """Персистит донабранный пересказ+фото WEEKLY-кандидата (см.
+    digest_engine.finalize_weekly_candidate) — WEEKLY откладывает дорогой пересказ до
+    момента реального отбора в выпуск, эта функция записывает результат обратно, чтобы
+    он не потерялся вместе с процессом планировщика до следующего опроса."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE candidates SET title = ?, body = ?, image_paths = ?, needs_manual_review = ?, "
+            "concerns = ? WHERE id = ?",
+            (title, body, json.dumps(image_paths, ensure_ascii=False), int(needs_manual_review),
+             json.dumps(concerns or [], ensure_ascii=False), candidate_id),
+        )
+
+
 def _candidate_from_row(row: sqlite3.Row) -> dict:
     d = dict(row)
     d["image_paths"] = json.loads(d.get("image_paths") or "[]")

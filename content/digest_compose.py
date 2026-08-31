@@ -10,6 +10,7 @@ Weekly (пятница). Кандидатов поставляет content/diges
 не заполняется слабым контентом, вплоть до нуля материалов во всём выпуске.
 """
 from content.base import draft_from_candidate_dict as _draft_from_dict
+from content.digest_engine import finalize_weekly_candidate
 from content.digest_store import (
     fetch_pool, fetch_candidates, update_candidate_status, create_digest_queue,
 )
@@ -172,6 +173,10 @@ def compose_morning_radar() -> None:
     used_ids |= {c["id"] for c in followup}
 
     for c in local + general + cinema + followup:
+        if c["route"] == "WEEKLY":
+            # WEEKLY-кандидаты приходят из пула ещё без пересказа/картинки (см.
+            # finalize_weekly_candidate) — донабираем прямо тут, раз уж реально отобраны.
+            c = finalize_weekly_candidate(c)
         items.append((dict(c, source_name=f"@{c['source_channel']}"), [c["id"]]))
 
     _dispatch_digest("🌅 Утренний дайджест", items, "morning")
@@ -255,6 +260,9 @@ def compose_weekly() -> None:
             break
         if type_counts.get(c["primary_type"], 0) >= WEEKLY_TYPE_CAP:
             continue
+        # Пересказ+картинка ещё не сделаны (см. finalize_weekly_candidate) — донабираем
+        # только для реально отобранных ~12, а не для всего недельного пула.
+        c = finalize_weekly_candidate(c)
         items.append((dict(c, source_name=f"@{c['source_channel']}"), [c["id"]]))
         type_counts[c["primary_type"]] = type_counts.get(c["primary_type"], 0) + 1
 
