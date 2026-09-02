@@ -26,7 +26,7 @@ from content.digest_store import (
 from content.llm import call_yandexgpt, extract_json, YANDEX_MODEL_LITE
 from content.news import (
     RawItem, TelegramChannelSource, AfishaRuSource,
-    DANGER_SOURCE_CHANNELS, SEASON_RUBRIC,
+    DANGER_SOURCE_CHANNELS, SEASON_RUBRIC, BPLA_KRAI_DISTRICTS,
     _danger_photo_for, _strip_channel_footer, _ensure_image,
     _is_fuel_topic, _fuel_photo, _strip_links,
 )
@@ -193,6 +193,29 @@ def _normalize(s: str) -> str:
 
 def _event_key(entity: str, event_type: str, location: str, action: str) -> str:
     return "|".join(_normalize(x) for x in (entity, event_type, location, action))
+
+
+def _is_bpla_text(text: str) -> bool:
+    lowered = text.lower()
+    return any(kw in lowered for kw in ("бпла", "беспилот"))
+
+
+# БПЛА-тревоги часто приходят как короткие "сиренные" посты ("❗️🅰️🅰️🅰️..." или "ОТМЕНА
+# СИГНАЛА") — LLM не может извлечь из них entity, а без entity _event_key() возвращал None,
+# и весь дедуп (включая статус-машину БПЛА чуть ниже) просто не запускался. Итог (владелец,
+# 2026-09-02): одна и та же тревога от chpnvrsk_official и nvrskadm выходила отдельными
+# постами с разницей в секунды. Ключ по району — детерминированный, не зависит от LLM, тот
+# же принцип, что уже используется для выбора фото БПЛА (см. _bpla_photo_for в news.py).
+def _bpla_event_key(text: str) -> str:
+    lowered = text.lower()
+    matched = [d for d in BPLA_KRAI_DISTRICTS if d in lowered]
+    if len(matched) == 1:
+        location = matched[0]
+    elif matched:
+        location = "край"  # несколько районов сразу — общая тревога по краю
+    else:
+        location = "новороссийск"  # район явно не назван — считаем нашим по умолчанию
+    return f"бпла|local_alert|{location}|тревога"
 
 
 def _pre_filter_hard_drop(text: str) -> str | None:
@@ -521,7 +544,10 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
 
     entity, event_type = data.get("entity", ""), data.get("event_type", data["primary_type"])
     location, action = data.get("location", ""), data.get("action", "")
-    event_key = _event_key(entity, event_type, location, action) if entity else None
+    if data["primary_type"] == "LOCAL_ALERT" and _is_bpla_text(combined_text):
+        event_key = _bpla_event_key(combined_text)  # детерминированный — не зависит от entity
+    else:
+        event_key = _event_key(entity, event_type, location, action) if entity else None
 
     if data["primary_type"] in CINEMA_PRIMARY_TYPES and entity:
         # настоящий постер вместо случайного фото источника (скриншот, кадр, обложка
