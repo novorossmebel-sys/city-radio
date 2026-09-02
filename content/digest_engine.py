@@ -28,6 +28,7 @@ from content.news import (
     RawItem, TelegramChannelSource, AfishaRuSource,
     DANGER_SOURCE_CHANNELS, SEASON_RUBRIC,
     _danger_photo_for, _strip_channel_footer, _ensure_image,
+    _is_fuel_topic, _fuel_photo, _strip_links,
 )
 from content.source_policy import (
     role_for, HUMOR_ONLY_CHANNELS, HEALTH_CLAIM_SOURCE, HEALTH_CLAIM_TRIGGERS,
@@ -401,6 +402,39 @@ def _handle_classification_failure(rubric: str, channel: str, item: RawItem) -> 
     update_candidate_status(candidate_id, "sent_moderation", digest_slot="now")
 
 
+def _handle_fuel_topic(rubric: str, channel: str, item: RawItem) -> None:
+    """Тема бензина/топлива (см. FUEL_TOPIC_KEYWORDS в content/news.py) — модель систематически
+    отказывается её пересказывать, поэтому вообще не идём к LLM: фиксированная иллюстрация +
+    исходный текст без ссылок (владелец, 2026-09-02), сразу на решение владельца как алерт."""
+    item.text = _strip_links(item.text)
+    matched = _fuel_photo()
+    if matched:
+        _cleanup_item_images(item)
+        item.image_paths = matched
+    item.image_paths = _ensure_image(rubric, item.title, item.text, item.image_paths)
+
+    concerns = ["⚠ тема бензина — рерайт через YandexGPT пропущен намеренно, показан исходный текст"]
+    candidate_id = insert_candidate(
+        source_channel=channel, rubric=rubric, raw_title=item.title, raw_text=item.text,
+        url=item.url, image_paths=item.image_paths, primary_type="FUEL_TOPIC",
+        event_key=None, title=item.title, body=item.text,
+        concerns=concerns, needs_manual_review=True, route="NOW", status="scored",
+    )
+    from moderation import ModerationBot  # локальный импорт — как и в остальных вызовах здесь
+    bot = ModerationBot()
+    if not (bot.token and bot.owner_chat_id):
+        return
+    draft = Draft(
+        rubric=rubric, source_name=item.source_label, source_url=item.url,
+        original_title=item.title, original_text=item.text,
+        title=item.title, body=item.text,
+        concerns=concerns, needs_manual_review=True,
+        image_paths=item.image_paths, candidate_ids=[candidate_id],
+    )
+    bot.send_draft(draft)
+    update_candidate_status(candidate_id, "sent_moderation", digest_slot="now")
+
+
 def _process_item(rubric: str, channel: str, item: RawItem) -> None:
     item.text = _strip_channel_footer(item.text)
     if not item.text:
@@ -408,6 +442,10 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
         return
 
     combined_text = f"{item.title} {item.text}"
+
+    if _is_fuel_topic(combined_text):
+        _handle_fuel_topic(rubric, channel, item)
+        return
 
     # Юмор — отдельный silo (раздел 17), вне общего скоринга. Pre-filter всё равно
     # применяется (юмористический канал тоже может репостить рекламу).

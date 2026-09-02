@@ -143,6 +143,38 @@ def _danger_photo_for(text: str) -> list:
     return []
 
 
+# Тема бензина/топлива — отдельный случай, не привязанный к DANGER_SOURCE_CHANNELS: она
+# встречается у любых источников, а YandexGPT систематически отказывается её обсуждать
+# (см. digest_engine.py::_process_item — 47 отказов классификации за 2 суток 2026-08-25,
+# больше половины именно на этой теме). Поэтому такие посты вообще не идут на рерайт —
+# берём исходный текст (без ссылок) и фиксированную иллюстрацию (владелец, 2026-09-02).
+FUEL_TOPIC_KEYWORDS = ("бензин", "топлив", "азс")
+# "заправ" сознательно не включаем — пересекается с "заправка для салата" в кулинарных
+# источниках (foodrumedia/thesaltmagazine/foodiscovery, см. sources.yaml).
+FUEL_PHOTO_PATH = DANGER_PHOTOS_DIR / "benzin.jpg"
+
+
+def _is_fuel_topic(text: str) -> bool:
+    lowered = text.lower()
+    return any(kw in lowered for kw in FUEL_TOPIC_KEYWORDS)
+
+
+def _fuel_photo() -> list:
+    return [str(FUEL_PHOTO_PATH)] if FUEL_PHOTO_PATH.exists() else []
+
+
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _strip_links(text: str) -> str:
+    """Убирает голые ссылки из текста — просьба владельца (2026-09-02) для тем, которые
+    идут в публикацию без рерайта и потому не проходят обычную LLM-очистку текста."""
+    cleaned = _URL_RE.sub("", text)
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)  # хвостовые пробелы после вырезанной ссылки
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 # Источники экстренных сообщений (см. DANGER_SOURCE_CHANNELS) в конце поста часто добавляют
 # рекламу собственного канала — в наших постах ей не место (владелец, 2026-08-17): "ссылки на
 # канал в самом тексте... их обязательно нужно удалять". Вырезаем такие строки на входе,
