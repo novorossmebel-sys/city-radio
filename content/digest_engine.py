@@ -23,7 +23,7 @@ from content.digest_store import (
     get_cursor, set_cursor, insert_candidate, update_candidate_status, update_candidate_content,
     get_event, upsert_event, is_in_cooldown, mark_event_published,
 )
-from content.llm import call_yandexgpt, extract_json
+from content.llm import call_yandexgpt, extract_json, YANDEX_MODEL_LITE
 from content.news import (
     RawItem, TelegramChannelSource, AfishaRuSource,
     DANGER_SOURCE_CHANNELS, SEASON_RUBRIC,
@@ -286,7 +286,13 @@ def _classify(rubric: str, channel: str, item: RawItem) -> dict | None:
         f"Заголовок источника: {item.title}\nТекст источника:\n{item.text}"
     )
     try:
-        raw = call_yandexgpt(DIGEST_CLASSIFY_SYSTEM_PROMPT, user_content, max_tokens=CLASSIFY_MAX_TOKENS)
+        # Lite-модель (2026-09-02): классификация не пересказывает текст, только оценивает его
+        # по структурированной схеме — нюанс формулировок здесь не нужен, а зовём её на
+        # порядок чаще, чем _rewrite(), так что модель тут и определяет основной счёт.
+        raw = call_yandexgpt(
+            DIGEST_CLASSIFY_SYSTEM_PROMPT, user_content,
+            max_tokens=CLASSIFY_MAX_TOKENS, model=YANDEX_MODEL_LITE,
+        )
         data = extract_json(raw)
     except Exception as e:
         print(f"[digest_engine] классификация не удалась для @{channel}: {e}")
