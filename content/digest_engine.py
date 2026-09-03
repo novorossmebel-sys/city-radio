@@ -195,18 +195,31 @@ def _event_key(entity: str, event_type: str, location: str, action: str) -> str:
     return "|".join(_normalize(x) for x in (entity, event_type, location, action))
 
 
-def _is_bpla_text(text: str) -> bool:
+# 2026-09-03: реальные посты про атаки не всегда говорят "БПЛА" — та же тревога звучит как
+# "тревога по БЭК" (безэкипажный катер), "Сирена в Новороссийске.", даже просто "В
+# Новороссийске громко." Ловим по всему словарю статус-машины сразу, не только по "бпла"/
+# "беспилот". "бэк" — по границе слова, иначе ловит "камбэк" и подобные.
+_BEK_RE = re.compile(r"\bбэк\b")
+ALERT_CASCADE_KEYWORDS = (
+    "бпла", "беспилот", "сирена", "тревог", "атак", "угроз", "отмена сигнала", "опасност", "🅰",
+)
+
+
+def _is_alert_cascade_text(text: str) -> bool:
     lowered = text.lower()
-    return any(kw in lowered for kw in ("бпла", "беспилот"))
+    if any(kw in lowered for kw in ALERT_CASCADE_KEYWORDS):
+        return True
+    return bool(_BEK_RE.search(lowered))
 
 
-# БПЛА-тревоги часто приходят как короткие "сиренные" посты ("❗️🅰️🅰️🅰️..." или "ОТМЕНА
-# СИГНАЛА") — LLM не может извлечь из них entity, а без entity _event_key() возвращал None,
-# и весь дедуп (включая статус-машину БПЛА чуть ниже) просто не запускался. Итог (владелец,
-# 2026-09-02): одна и та же тревога от chpnvrsk_official и nvrskadm выходила отдельными
-# постами с разницей в секунды. Ключ по району — детерминированный, не зависит от LLM, тот
-# же принцип, что уже используется для выбора фото БПЛА (см. _bpla_photo_for в news.py).
-def _bpla_event_key(text: str) -> str:
+# БПЛА/БЭК-тревоги часто приходят как короткие "сиренные" посты — LLM не может извлечь из
+# них entity, а без entity _event_key() возвращал None, и весь дедуп (включая статус-машину
+# чуть ниже) просто не запускался. Итог (владелец, 2026-09-02, затем 2026-09-03): одна и та
+# же тревога от chpnvrsk_official и nvrskadm выходила отдельными постами с разницей в
+# секунды — за одну ночь 6 постов за ~80 секунд. Ключ по району — детерминированный, не
+# зависит от LLM, тот же принцип, что уже используется для выбора фото БПЛА (см.
+# _bpla_photo_for в news.py).
+def _alert_event_key(text: str) -> str:
     lowered = text.lower()
     matched = [d for d in BPLA_KRAI_DISTRICTS if d in lowered]
     if len(matched) == 1:
@@ -415,8 +428,26 @@ def _handle_classification_failure(rubric: str, channel: str, item: RawItem) -> 
     """Классификация целиком отказала (обычно — фильтр безопасности модели, см. комментарий
     у места вызова) на алертном канале — LLM здесь больше не участвует вообще, чтобы не
     отказать повторно: фото — та же логика, что и в обычном пути (danger-фото по ключевым
-    словам в исходном тексте, затем YandexART-фоллбэк), текст — исходный, без пересказа."""
-    matched = _danger_photo_for(f"{item.title} {item.text}")
+    словам в исходном тексте, затем YandexART-фоллбэк), текст — исходный, без пересказа.
+
+    Дедуп (владелец, 2026-09-03): этот путь оказался ОСНОВНЫМ для атак БПЛА/БЭК, не
+    запасным — модель отказывается обсуждать их почти всегда, а не изредка. Раньше дедупа
+    тут не было вообще: за одну ночь 6 постов с двух каналов про одну и ту же атаку ушли
+    за ~80 секунд отдельными карточками. Та же статус-машина, что и в обычном пути (см.
+    комментарий у _alert_event_key), по детерминированному ключу, не зависящему от LLM."""
+    combined_text = f"{item.title} {item.text}"
+    event_key = None
+    if _is_alert_cascade_text(combined_text):
+        event_key = _alert_event_key(combined_text)
+        existing = get_event(event_key)
+        new_status = _bpla_status_from_text(combined_text) or "THREAT"
+        if existing is not None and existing["status"] == new_status:
+            print(f"[digest_engine] дроп @{channel}: повтор тревоги, статус не изменился (event_key={event_key})")
+            _cleanup_item_images(item)
+            return
+        upsert_event(event_key, "LOCAL_ALERT", new_status, item.title, channel)
+
+    matched = _danger_photo_for(combined_text)
     if matched:
         _cleanup_item_images(item)
         item.image_paths = matched
@@ -425,7 +456,7 @@ def _handle_classification_failure(rubric: str, channel: str, item: RawItem) -> 
     candidate_id = insert_candidate(
         source_channel=channel, rubric=rubric, raw_title=item.title, raw_text=item.text,
         url=item.url, image_paths=item.image_paths, primary_type="LOCAL_ALERT",
-        event_key=None, title=item.title, body=item.text,
+        event_key=event_key, title=item.title, body=item.text,
         concerns=["⚠ не удалось обработать автоматически (вероятно, отказ модели) — прислано как есть"],
         needs_manual_review=True, route="NOW", status="scored",
     )
@@ -544,8 +575,8 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
 
     entity, event_type = data.get("entity", ""), data.get("event_type", data["primary_type"])
     location, action = data.get("location", ""), data.get("action", "")
-    if data["primary_type"] == "LOCAL_ALERT" and _is_bpla_text(combined_text):
-        event_key = _bpla_event_key(combined_text)  # детерминированный — не зависит от entity
+    if data["primary_type"] == "LOCAL_ALERT" and _is_alert_cascade_text(combined_text):
+        event_key = _alert_event_key(combined_text)  # детерминированный — не зависит от entity
     else:
         event_key = _event_key(entity, event_type, location, action) if entity else None
 
