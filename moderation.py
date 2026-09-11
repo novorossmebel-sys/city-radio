@@ -6,10 +6,21 @@
 они шлются владельцу отдельным превью-сообщением перед текстом с кнопками.
 - «Опубликовать» → пост уходит в MAX → пауза 30-40 сек → пост уходит в Telegram-канал →
   владельцу приходит сообщение с кнопками-реакциями 👍/🔥/👎/♻️ (личный обучающий слой,
-  раздел политики владельца 2026-08-19) — не самоудаляется, реагировать можно в любой момент.
+  раздел политики владельца 2026-08-19). Сама реакция пишется в БД (content.digest_store.
+  feedback) сразу по клику, а карточка — как и другие служебные сообщения без активных
+  кнопок решения — удаляется через AUTO_DELETE_AFTER_SECONDS (владелец, 2026-09-03), данные
+  при этом не теряются.
 - «Отклонить» → черновик просто отбрасывается.
 - «Править» → владелец отвечает текстом (первая строка — заголовок, остальное — тело),
   бот подставляет правку и заново присылает черновик с теми же кнопками.
+
+Карточка, на которую владелец не отреагировал дольше DECISION_CARD_AUTO_REJECT_SECONDS,
+отклоняется автоматически (см. _sweep_stale_decisions) — тем же путём, что и ручное
+«Отклонить», но без авто-подбора следующего поста той же рубрики.
+
+Повторное нажатие approve/edit, пока бот занят обработкой первого нажатия (см. ниже про
+блокирующий однопоточный polling), игнорируется в течение ACTION_DEBOUNCE_SECONDS —
+раньше это означало повторную публикацию в канал / второй запрос текста правки.
 
 Используется тот же бот (TELEGRAM_BOT_TOKEN), что публикует в канал — он же пишет
 владельцу в личные сообщения. Владелец должен хотя бы раз написать боту (например /start),
@@ -44,6 +55,25 @@ from publishers.max import MaxPublisher
 
 PUBLISH_DELAY_RANGE = (30, 40)  # секунды между публикацией в MAX и в Telegram
 STATUS_MESSAGE_TTL = 10  # секунд до удаления "Публикую…" после факта (сообщение с реакциями не удаляется)
+ACTION_DEBOUNCE_SECONDS = 90  # см. _handle_callback: approve/edit блокируют единственный поток
+# обработки апдейтов на 10-50 сек (см. PUBLISH_DELAY_RANGE, STATUS_MESSAGE_TTL) — за это время
+# бот не отвечает вообще ни на что, и владелец нередко жмёт ту же кнопку повторно, не дождавшись
+# реакции. Повтор нажатия "approve" в этом окне раньше означал повторную публикацию в канал,
+# повтор "edit" — второе "пришлите исправленный текст" (было замечено владельцем 2026-09-03).
+AUTO_DELETE_AFTER_SECONDS = 30 * 60  # владелец, 2026-09-03: служебные сообщения без активных
+# кнопок решения (статусы, промпт "пришлите исправленный текст", "Опубликовано" с реакциями)
+# не должны копиться в чате вечно. Карточки черновиков с кнопками Опубликовать/Отклонить/
+# Править сюда НЕ входят: пока решение не принято, карточка не регистрируется в очереди
+# автоудаления (см. _track_for_cleanup) — а как только решение принято, она удаляется сразу
+# же (см. _handle_callback), а не ждёт 30 минут. Данные по реакциям не теряются при удалении
+# сообщения — они уже пишутся в БД (content.digest_store.feedback) в момент клика.
+DECISION_CARD_AUTO_REJECT_SECONDS = 4 * 60 * 60  # владелец, 2026-09-04: карточки-решения
+# специально не входят в AUTO_DELETE_AFTER_SECONDS выше (решение ещё не принято) — но это
+# привело к тому, что нерассмотренные карточки просто копились в чате без предела (заметил
+# владелец 2026-09-04, попросил авто-отклонять старые). Если карточка висит без ответа
+# дольше этого времени — считаем решение implicit «отклонить», тем же путём, что и ручной
+# reject (см. _sweep_stale_decisions), НО без auto-continue по рубрике
+# (_handle_reject_followup): раз владелец не отвечает, не стоит подсовывать ему ещё материал.
 STATE_FILE = Path("moderation_state.json")
 QUEUE_ADVANCE_DELAY = 120  # секунд между решением по карточке и следующей из очереди
 # дайджеста (2026-08-25, по просьбе владельца — выпуски раньше слались весь разом;
@@ -54,8 +84,12 @@ QUEUE_ADVANCE_DELAY = 120  # секунд между решением по ка�
 
 
 def _format_draft_message(draft: Draft) -> str:
+    # Строку "Рубрика: ..." убрали (владелец, 2026-09-02) — классификация по primary_type
+    # регулярно клеймила обычные новости (дни рождения чиновников, открытия досок) как
+    # LOCAL_ALERT, и заголовок рубрики на карточке вводил в заблуждение сильнее, чем помогал.
+    # draft.rubric по-прежнему используется ниже (пауза рубрики, счётчики) — просто не
+    # выводится читателю карточки.
     lines = [
-        f"📌 Рубрика: {draft.rubric}",
         f"🔗 Источник: {draft.source_name}" + ("" if draft.include_source else " (сейчас скрыт в посте)"),
         "",
         f"<b>{draft.title}</b>",
@@ -109,6 +143,11 @@ class ModerationBot:
         self.awaiting_edit = {}    # chat_id (str) -> draft_id, ждём текст правки
         self.photo_messages = {}   # draft_id -> [message_id...], превью фото в личке владельца
         self._removed_draft_ids = set()  # см. _save_state — чтобы merge с диском не воскрешал удалённое
+        self._auto_delete = {}     # "chat_id:message_id" -> unix-время отправки, см. AUTO_DELETE_AFTER_SECONDS
+        self._removed_auto_delete_keys = set()  # см. _removed_draft_ids — та же причина
+        self._recent_actions = {}  # (draft_id, action) -> unix-время обработки, см. ACTION_DEBOUNCE_SECONDS
+        self._pending_sent_at = {}   # draft_id -> unix-время отправки карточки, см. DECISION_CARD_AUTO_REJECT_SECONDS
+        self._card_message_ids = {}  # draft_id -> {"chat_id", "message_id"} самой карточки, для того же таймаута
         self._offset = 0
         self._load_state()
 
@@ -125,6 +164,9 @@ class ModerationBot:
             self.pending = {k: Draft(**v) for k, v in data.get("pending", {}).items()}
             self.awaiting_edit = data.get("awaiting_edit", {})
             self.photo_messages = data.get("photo_messages", {})
+            self._auto_delete = data.get("auto_delete", {})
+            self._pending_sent_at = data.get("pending_sent_at", {})
+            self._card_message_ids = data.get("card_message_ids", {})
             self._offset = data.get("offset", 0)
         except (json.JSONDecodeError, OSError, TypeError) as e:
             print(f"[moderation] не смог прочитать {STATE_FILE}, стартую с пустой очереди: {e}")
@@ -140,13 +182,17 @@ class ModerationBot:
         2026-08-17, разными путями). Explicit remove (del self.pending[...]) — через
         _removed_draft_ids, иначе слияние с диском воскрешало бы то, что мы только что
         намеренно удалили."""
-        disk_pending, disk_awaiting, disk_photo = {}, {}, {}
+        disk_pending, disk_awaiting, disk_photo, disk_auto_delete = {}, {}, {}, {}
+        disk_sent_at, disk_card_msg = {}, {}
         if STATE_FILE.exists():
             try:
                 disk_data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
                 disk_pending = disk_data.get("pending", {})
                 disk_awaiting = disk_data.get("awaiting_edit", {})
                 disk_photo = disk_data.get("photo_messages", {})
+                disk_auto_delete = disk_data.get("auto_delete", {})
+                disk_sent_at = disk_data.get("pending_sent_at", {})
+                disk_card_msg = disk_data.get("card_message_ids", {})
             except (json.JSONDecodeError, OSError):
                 pass
 
@@ -154,17 +200,31 @@ class ModerationBot:
         merged_pending.update({k: asdict(v) for k, v in self.pending.items()})
         merged_photo = dict(disk_photo)
         merged_photo.update(self.photo_messages)
+        merged_sent_at = dict(disk_sent_at)
+        merged_sent_at.update(self._pending_sent_at)
+        merged_card_msg = dict(disk_card_msg)
+        merged_card_msg.update(self._card_message_ids)
         for removed_id in self._removed_draft_ids:
             merged_pending.pop(removed_id, None)
             merged_photo.pop(removed_id, None)
+            merged_sent_at.pop(removed_id, None)
+            merged_card_msg.pop(removed_id, None)
 
         merged_awaiting = dict(disk_awaiting)
         merged_awaiting.update(self.awaiting_edit)
+
+        merged_auto_delete = dict(disk_auto_delete)
+        merged_auto_delete.update(self._auto_delete)
+        for removed_key in self._removed_auto_delete_keys:
+            merged_auto_delete.pop(removed_key, None)
 
         data = {
             "pending": merged_pending,
             "awaiting_edit": merged_awaiting,
             "photo_messages": merged_photo,
+            "auto_delete": merged_auto_delete,
+            "pending_sent_at": merged_sent_at,
+            "card_message_ids": merged_card_msg,
             "offset": self._offset,
         }
         STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -188,6 +248,12 @@ class ModerationBot:
             self.awaiting_edit.setdefault(chat_id, draft_id)
         for draft_id, message_ids in data.get("photo_messages", {}).items():
             self.photo_messages.setdefault(draft_id, message_ids)
+        for key, sent_at in data.get("auto_delete", {}).items():
+            self._auto_delete.setdefault(key, sent_at)
+        for draft_id, sent_at in data.get("pending_sent_at", {}).items():
+            self._pending_sent_at.setdefault(draft_id, sent_at)
+        for draft_id, info in data.get("card_message_ids", {}).items():
+            self._card_message_ids.setdefault(draft_id, info)
 
     def _send_photos_preview(self, chat_id, image_paths: list) -> list:
         """Шлёт фото/альбом владельцу как превью (без подписи — текст идёт отдельным
@@ -255,7 +321,9 @@ class ModerationBot:
             except OSError:
                 pass
 
-    def _send_text_with_keyboard(self, chat_id, text: str, keyboard: dict) -> bool:
+    def _send_text_with_keyboard(self, chat_id, text: str, keyboard: dict):
+        """Возвращает id отправленного сообщения (или None при сбое) — нужен для
+        _sweep_stale_decisions, у которого нет callback_query с готовой ссылкой на карточку."""
         try:
             r = requests.post(
                 self._api("sendMessage"),
@@ -264,11 +332,11 @@ class ModerationBot:
             )
         except requests.RequestException as e:
             print(f"[moderation] сетевая ошибка при отправке черновика: {e}")
-            return False
+            return None
         if not r.ok or not r.json().get("ok"):
             print(f"[moderation] не смог отправить черновик: {r.text}")
-            return False
-        return True
+            return None
+        return r.json()["result"]["message_id"]
 
     def send_draft(self, draft: Draft) -> str:
         """Отправляет черновик владельцу на модерацию. Возвращает id черновика."""
@@ -277,6 +345,7 @@ class ModerationBot:
         text = _format_draft_message(draft)
         keyboard = _keyboard_for(draft, draft_id)
         photo_delivered = False
+        card_message_id = None
 
         # короткий текст + одно фото — превью одним сообщением (фото+подпись+кнопки),
         # так и будет выглядеть реальный пост. Альбом (несколько фото) не может нести
@@ -285,7 +354,9 @@ class ModerationBot:
         if len(draft.image_paths) == 1 and len(text) <= TELEGRAM_CAPTION_LIMIT:
             msg_id = self._send_photo_with_caption(self.owner_chat_id, draft.image_paths[0], text, keyboard)
             photo_delivered = msg_id is not None
-            if not photo_delivered:
+            if photo_delivered:
+                card_message_id = msg_id
+            else:
                 # без фолбэка ниже черновик оставался "отправленным" только в self.pending —
                 # владелец никогда не видел карточку и не мог на неё нажать (нашли 2026-08-24:
                 # битое/слишком большое фото роняло именно эту ветку, карточка молча повисала)
@@ -298,10 +369,20 @@ class ModerationBot:
         self._save_state()
 
         if not photo_delivered:
-            if not self._send_text_with_keyboard(self.owner_chat_id, text, keyboard):
+            card_message_id = self._send_text_with_keyboard(self.owner_chat_id, text, keyboard)
+            if card_message_id is None:
                 time.sleep(3)
-                if not self._send_text_with_keyboard(self.owner_chat_id, text, keyboard):
+                card_message_id = self._send_text_with_keyboard(self.owner_chat_id, text, keyboard)
+                if card_message_id is None:
                     print(f"[moderation] черновик {draft_id} так и не удалось доставить владельцу")
+
+        # время отправки и id самой карточки — только для _sweep_stale_decisions
+        # (таймаут-автоотклонение), обычные approve/reject/edit берут chat_id/message_id
+        # прямо из callback_query и в этих полях не нуждаются
+        self._pending_sent_at[draft_id] = time.time()
+        if card_message_id is not None:
+            self._card_message_ids[draft_id] = {"chat_id": self.owner_chat_id, "message_id": card_message_id}
+        self._save_state()
         return draft_id
 
     def send_next_queued(self, queue_id: int) -> None:
@@ -316,12 +397,26 @@ class ModerationBot:
             return
 
         item = queue["items"][queue["cursor"]]
+        # Продвигаем курсор ДО отправки, не после (было наоборот) — иначе краш/рестарт
+        # процесса между send_draft и advance_digest_queue навсегда подвешивает очередь
+        # на этом же пункте: следующий вызов send_next_queued читает тот же (старый)
+        # cursor и пытается отправить тот же пункт ещё раз (нашли 2026-09-04: так
+        # отправка повторно наткнулась на уже удалённый _cleanup_images файл и упала
+        # молча — Timer-поток, исключение никто не увидел, очередь осталась висеть).
+        advance_digest_queue(queue_id)
         draft = draft_from_candidate_dict(item["draft"], candidate_ids=item["candidate_ids"])
         draft.queue_id = queue_id
-        self.send_draft(draft)
+        try:
+            self.send_draft(draft)
+        except Exception as e:
+            print(f"[moderation] очередь {queue_id}: не смог отправить следующую карточку: {e}")
+            self._track_for_cleanup(self.owner_chat_id, self._send_text(
+                self.owner_chat_id,
+                f"⚠ Очередь дайджеста: следующую карточку не удалось отправить ({e}).",
+            ))
+            return
         for cid in item["candidate_ids"]:
             update_candidate_status(cid, "sent_moderation", digest_slot=queue["slot"])
-        advance_digest_queue(queue_id)
 
     def _publish_draft(self, draft: Draft) -> bool:
         """Публикует в MAX и Telegram. Оба паблишера сами не бросают исключений при
@@ -358,8 +453,11 @@ class ModerationBot:
 
     def send_text(self, chat_id, text: str):
         """Публичная обёртка над _send_text — для вызовов извне модуля (например,
-        заголовочного сообщения дайджест-выпуска, см. content/digest_compose.py)."""
-        return self._send_text(chat_id, text)
+        заголовочного сообщения дайджест-выпуска, см. content/digest_compose.py).
+        Без кнопок решения — регистрируется на автоудаление, как и внутренние статусы."""
+        message_id = self._send_text(chat_id, text)
+        self._track_for_cleanup(chat_id, message_id)
+        return message_id
 
     def _send_reaction_prompt(self, chat_id, feedback_id: int):
         """Сообщение "Опубликовано" с кнопками-реакциями вместо самоудаляющегося статуса —
@@ -429,6 +527,64 @@ class ModerationBot:
         except requests.RequestException as e:
             print(f"[moderation] не смог удалить сообщение {message_id}: {e}")
 
+    def _track_for_cleanup(self, chat_id, message_id) -> None:
+        """Регистрирует служебное сообщение (без активных кнопок решения) на автоудаление
+        через AUTO_DELETE_AFTER_SECONDS — см. _sweep_auto_delete. Карточки черновиков
+        (Опубликовать/Отклонить/Править) сюда не передаются нигде в коде — они либо ещё
+        ждут решения, либо удаляются сразу же при решении в _handle_callback."""
+        if message_id is None:
+            return
+        self._auto_delete[f"{chat_id}:{message_id}"] = time.time()
+
+    def _sweep_auto_delete(self) -> None:
+        """Чистит служебные сообщения старше AUTO_DELETE_AFTER_SECONDS. Вызывается раз за
+        итерацию poll_forever — раз в ~30 сек этого достаточно для 30-минутного окна."""
+        now = time.time()
+        expired = [k for k, sent_at in self._auto_delete.items() if now - sent_at >= AUTO_DELETE_AFTER_SECONDS]
+        if not expired:
+            return
+        for key in expired:
+            chat_id, _, message_id = key.partition(":")
+            self._delete_message(chat_id, int(message_id))
+            del self._auto_delete[key]
+            self._removed_auto_delete_keys.add(key)
+        self._save_state()
+
+    def _sweep_stale_decisions(self) -> None:
+        """Автоматически отклоняет карточки-решения, на которые владелец не отреагировал
+        дольше DECISION_CARD_AUTO_REJECT_SECONDS — см. константу. Тем же путём, что и
+        ручной reject (удаление карточки/фото-превью, cleanup картинок, статус candidate
+        → dropped, продвижение очереди дайджеста), но БЕЗ _handle_reject_followup: раз
+        владелец не отвечает часами, не стоит присылать ему ещё материал по той же рубрике."""
+        now = time.time()
+        stale_ids = [
+            draft_id for draft_id, sent_at in self._pending_sent_at.items()
+            if draft_id in self.pending and now - sent_at >= DECISION_CARD_AUTO_REJECT_SECONDS
+        ]
+        if not stale_ids:
+            return
+
+        from content.digest_store import update_candidate_status
+        for draft_id in stale_ids:
+            draft = self.pending[draft_id]
+            card = self._card_message_ids.get(draft_id)
+            if card is not None:
+                self._delete_message(card["chat_id"], card["message_id"])
+            for pid in self.photo_messages.pop(draft_id, []):
+                self._delete_message(self.owner_chat_id, pid)
+            self._cleanup_images(draft)
+            if draft.candidate_ids:
+                for cid in draft.candidate_ids:
+                    update_candidate_status(cid, "dropped")
+            del self.pending[draft_id]
+            self._removed_draft_ids.add(draft_id)
+            if draft.queue_id is not None:
+                threading.Timer(QUEUE_ADVANCE_DELAY, self.send_next_queued, args=(draft.queue_id,)).start()
+
+        self._save_state()
+        print(f"[moderation] авто-отклонил {len(stale_ids)} карточек(и) без ответа дольше "
+              f"{DECISION_CARD_AUTO_REJECT_SECONDS // 3600} ч.")
+
     def _handle_callback(self, cq: dict) -> None:
         data = cq.get("data", "")
         chat_id = cq["message"]["chat"]["id"]
@@ -444,6 +600,19 @@ class ModerationBot:
         if ":" not in data:
             return
         action, draft_id = data.split(":", 1)
+
+        if action in ("approve", "edit"):
+            # см. ACTION_DEBOUNCE_SECONDS: пока идёт обработка первого нажатия (approve —
+            # блокирующая пауза 10-50 сек), бот не отвечает совсем, и повторный тап на ту же
+            # кнопку раньше означал вторую публикацию в канал / второй "пришлите текст".
+            debounce_key = (draft_id, action)
+            last_handled = self._recent_actions.get(debounce_key)
+            now = time.time()
+            if last_handled is not None and now - last_handled < ACTION_DEBOUNCE_SECONDS:
+                print(f"[moderation] дубль нажатия «{action}» для {draft_id} — игнорирую")
+                return
+            self._recent_actions[debounce_key] = now
+
         # безусловно, не только когда draft_id не найден: черновик мог быть найден (уже
         # подхвачен ранним reload), но фото к нему прислал отдельный процесс уже ПОСЛЕ
         # этого — тогда photo_messages для него ещё не подтянут, и удаление фото при
@@ -451,7 +620,7 @@ class ModerationBot:
         self._reload_pending()
         draft = self.pending.get(draft_id)
         if draft is None:
-            self._send_text(chat_id, "Этот черновик уже обработан или устарел.")
+            self._track_for_cleanup(chat_id, self._send_text(chat_id, "Этот черновик уже обработан или устарел."))
             return
 
         if action == "approve":
@@ -459,6 +628,9 @@ class ModerationBot:
             for pid in self.photo_messages.pop(draft_id, []):
                 self._delete_message(chat_id, pid)
             publishing_id = self._send_text(chat_id, "Публикую…")
+            self._track_for_cleanup(chat_id, publishing_id)  # подстраховка на случай, если
+            # процесс упадёт до штатного удаления ниже (через STATUS_MESSAGE_TTL) — тогда
+            # заберёт общая чистка не позже AUTO_DELETE_AFTER_SECONDS.
             tg_ok = self._publish_draft(draft)
 
             if not tg_ok:
@@ -467,10 +639,10 @@ class ModerationBot:
                 # кнопками под новым id, старую запись убираем только теперь.
                 if publishing_id:
                     self._delete_message(chat_id, publishing_id)
-                self._send_text(
+                self._track_for_cleanup(chat_id, self._send_text(
                     chat_id,
                     "⚠ Публикация в Telegram не удалась (сетевая ошибка). Пришлю черновик заново.",
-                )
+                ))
                 self.send_draft(draft)
                 del self.pending[draft_id]
                 self._removed_draft_ids.add(draft_id)
@@ -483,7 +655,11 @@ class ModerationBot:
             for cid in draft.candidate_ids:
                 update_candidate_status(cid, "published")
             feedback_id = log_published(draft.rubric, draft.source_name, draft.title)
-            self._send_reaction_prompt(chat_id, feedback_id)  # НЕ самоудаляется — реагировать можно в любой момент
+            reaction_msg_id = self._send_reaction_prompt(chat_id, feedback_id)
+            # само сообщение уйдёт через AUTO_DELETE_AFTER_SECONDS (владелец, 2026-09-03) —
+            # реакция уже пишется в БД в момент клика (см. _handle_reaction), не в чате,
+            # так что удаление карточки данные не теряет.
+            self._track_for_cleanup(chat_id, reaction_msg_id)
 
             del self.pending[draft_id]
             self._removed_draft_ids.add(draft_id)
@@ -500,6 +676,7 @@ class ModerationBot:
             time.sleep(STATUS_MESSAGE_TTL)
             if publishing_id:
                 self._delete_message(chat_id, publishing_id)
+                self._auto_delete.pop(f"{chat_id}:{publishing_id}", None)
         elif action == "reject":
             self._delete_message(chat_id, cq["message"]["message_id"])
             for pid in self.photo_messages.pop(draft_id, []):
@@ -521,11 +698,14 @@ class ModerationBot:
                 self._delete_message(chat_id, pid)
             self.awaiting_edit[str(chat_id)] = draft_id
             self._save_state()
-            self._send_text(
+            prompt_id = self._send_text(
                 chat_id,
                 "Пришлите исправленный текст ответом на это сообщение.\n"
                 "Первая строка — заголовок, остальное — текст поста.",
             )
+            # удаление через AUTO_DELETE_AFTER_SECONDS не ломает саму правку: _handle_message
+            # проверяет self.awaiting_edit, а не наличие этого сообщения в чате.
+            self._track_for_cleanup(chat_id, prompt_id)
         elif action == "toggle_source":
             draft.include_source = not draft.include_source
             self._save_state()
@@ -550,7 +730,7 @@ class ModerationBot:
         """После отклонения — тут же следующий пост из той же рубрики (следующий источник
         по кругу), либо пауза рубрики после 3 отклонений подряд. См. content/rotation.py."""
         from content.rotation import is_paused, record_reject, get_next_item
-        from content.news import verify_and_rewrite, build_structured_draft
+        from content.news import verify_and_rewrite, build_structured_draft, _is_fuel_topic
 
         # рубрики со структурированными данными (не текст новости) не проходят LLM-рерайт —
         # см. build_structured_draft
@@ -561,10 +741,10 @@ class ModerationBot:
 
         just_paused = record_reject(draft.rubric)
         if just_paused:
-            self._send_text(
+            self._track_for_cleanup(self.owner_chat_id, self._send_text(
                 self.owner_chat_id,
                 f"⏸ Рубрика «{draft.rubric}»: 3 отклонения подряд — приостановлена до 10:00 завтра.",
-            )
+            ))
             return
 
         # реклама (см. verify_and_rewrite → is_advertisement) не должна доходить до владельца
@@ -574,11 +754,22 @@ class ModerationBot:
             try:
                 item = get_next_item(draft.rubric)
                 if item is None:
-                    self._send_text(
+                    self._track_for_cleanup(self.owner_chat_id, self._send_text(
                         self.owner_chat_id,
                         f"[{draft.rubric}] не нашёл следующий источник для авто-подбора.",
-                    )
+                    ))
                     return
+                if _is_fuel_topic(f"{item.title} {item.text}"):
+                    # тема бензина — своя де-дупицированная обработка с окном ожидания
+                    # в digest_engine.py (см. FUEL_WINDOW, владелец 2026-09-04): этот путь
+                    # (ротация источников после отклонения) о ней не знает и раньше слал
+                    # такой пост через обычный verify_and_rewrite ещё раз — источник у
+                    # темы бензина один физический канал, но одновременно числится в
+                    # нескольких рубриках (см. sources.yaml), и ротация каждой рубрики
+                    # натыкалась на один и тот же пост независимо, отсюда повторные
+                    # карточки. Молча пробуем следующий источник — сам пост подхватит
+                    # digest_engine на своём обычном опросе.
+                    continue
                 if draft.rubric in NO_REWRITE_RUBRICS:
                     next_draft = build_structured_draft(draft.rubric, item)
                 else:
@@ -586,10 +777,10 @@ class ModerationBot:
             except Exception as e:
                 # сетевой/временный сбой (Telethon, YandexGPT) не должен ронять весь бот —
                 # без этого один таймаут во время авто-продолжения убивал polling целиком.
-                self._send_text(
+                self._track_for_cleanup(self.owner_chat_id, self._send_text(
                     self.owner_chat_id,
                     f"[{draft.rubric}] авто-подбор следующего поста не удался (временная ошибка): {e}",
-                )
+                ))
                 return
 
             if next_draft is not None:
@@ -597,10 +788,10 @@ class ModerationBot:
                 return
             # next_draft is None → реклама, пробуем следующий источник молча
 
-        self._send_text(
+        self._track_for_cleanup(self.owner_chat_id, self._send_text(
             self.owner_chat_id,
             f"[{draft.rubric}] несколько источников подряд оказались рекламой — попробуйте позже.",
-        )
+        ))
 
     def _handle_message(self, msg: dict) -> None:
         chat_id = str(msg["chat"]["id"])
@@ -620,7 +811,7 @@ class ModerationBot:
             draft.body = text.strip()
 
         del self.awaiting_edit[chat_id]
-        self._send_text(chat_id, "Обновил черновик:")
+        self._track_for_cleanup(chat_id, self._send_text(chat_id, "Обновил черновик:"))
         self.send_draft(draft)  # пересылаем правленый вариант с кнопками под новым id (сохраняет состояние)
         del self.pending[draft_id]  # старая версия больше не актуальна
         self._removed_draft_ids.add(draft_id)
@@ -634,6 +825,8 @@ class ModerationBot:
         print("[moderation] бот-модератор запущен, жду решений владельца. Ctrl+C для выхода.")
         while True:
             self._reload_pending()
+            self._sweep_auto_delete()  # раз в итерацию (~30 сек) достаточно для 30-минутного окна
+            self._sweep_stale_decisions()  # то же самое, но для карточек-решений — см. константу
             try:
                 r = requests.get(
                     self._api("getUpdates"),

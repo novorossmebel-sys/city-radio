@@ -15,19 +15,21 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import yaml
 
 from content.base import Draft
 from content.digest_store import (
     get_cursor, set_cursor, insert_candidate, update_candidate_status, update_candidate_content,
-    get_event, upsert_event, is_in_cooldown, mark_event_published,
+    get_event, upsert_event, is_in_cooldown, mark_event_published, fetch_candidates,
 )
-from content.llm import call_yandexgpt, extract_json
+from content.llm import call_yandexgpt, extract_json, YANDEX_MODEL_LITE
 from content.news import (
     RawItem, TelegramChannelSource, AfishaRuSource,
-    DANGER_SOURCE_CHANNELS, SEASON_RUBRIC,
+    DANGER_SOURCE_CHANNELS, SEASON_RUBRIC, BPLA_KRAI_DISTRICTS,
     _danger_photo_for, _strip_channel_footer, _ensure_image,
+    _is_fuel_topic, _fuel_photo, _strip_links,
 )
 from content.source_policy import (
     role_for, HUMOR_ONLY_CHANNELS, HEALTH_CLAIM_SOURCE, HEALTH_CLAIM_TRIGGERS,
@@ -50,6 +52,13 @@ NORMAL_POLL_LIMIT = 5
 # отпустило: content/digest_store.py's WAL-фикс от 2026-08-19 лечит конкурентную запись,
 # это отдельная история про подвисший event loop).
 HEARTBEAT_FILE = Path("scheduler_heartbeat.txt")
+
+FUEL_WINDOW_TZ = ZoneInfo("Europe/Moscow")
+FUEL_WINDOW_START_HOUR = 9   # владелец, 2026-09-04: утренние посты про топливо/АЗС от
+FUEL_WINDOW_END_HOUR = 10    # разных источников за этот час — по сути один и тот же
+# статус, пересказанный несколько раз. Вместо карточки на каждый пост — копим в этом
+# окне (см. _handle_fuel_topic) и в конце шлём только самый содержательный (см.
+# flush_fuel_window). Вне окна — старое поведение, карточка сразу.
 
 PRIMARY_TYPES = (
     "LOCAL_ALERT", "LOCAL_STATUS", "LOCAL_UTILITY", "LOCAL_EVENT",
@@ -77,6 +86,19 @@ DIGEST_CLASSIFY_SYSTEM_PROMPT = f"""Ты — редактор-аналитик �
    О рекламе/бизнесе). needs_manual_review — если текст непонятен, вырван из контекста, или
    рубрика про происшествия/здоровье и в тексте только слухи/один неофициальный источник.
 2. primary_type — ровно один из: {", ".join(PRIMARY_TYPES)}.
+   Внутри LOCAL_*-типов разница по СОДЕРЖАНИЮ поста, а не по каналу-источнику — официальный
+   канал администрации/ЧС пишет обо всём подряд, не только о тревогах, и то, что канал сам по
+   себе "алертный", не делает алертом каждый его пост (владелец, 2026-09-02: дни рождения
+   чиновников и открытия памятных досок уходили под рубрику "Норд-ост и погода" как тревоги):
+   - LOCAL_ALERT — ДЕЙСТВУЮЩАЯ опасность/угроза прямо сейчас, требующая реакции читателя:
+     БПЛА/ракетная тревога, шторм/ветер/паводок, крупная авария, отключение воды/света/газа
+     В ПРОЦЕССЕ. Не путать с новостью О прошедшей опасности (см. LOCAL_EVENT/LOCAL_STATUS).
+   - LOCAL_STATUS — официальная сводка/статус без непосредственной угрозы читателю (итоги
+     совещания, наличие топлива на АЗС, ход работ, отчёт чиновника).
+   - LOCAL_UTILITY — плановые бытовые ЖКХ-новости, находки/пропажи, объявления для жителей.
+   - LOCAL_EVENT — мероприятие, церемония, юбилей, приём граждан, спорт, культура, день
+     рождения/назначение — любая новость БЕЗ элемента опасности или срочности, даже если её
+     опубликовал официальный или алертный канал.
 3. event_type — короткий ярлык события в SCREAMING_SNAKE_CASE, конкретнее чем primary_type
    (например BPLA_ALERT, WATER_OUTAGE, CINEMA_RELEASE_DATE, RESTAURANT_OPENING).
 4. entity — главная сущность события (город/район, название фильма, тема), location — где
@@ -179,6 +201,42 @@ def _normalize(s: str) -> str:
 
 def _event_key(entity: str, event_type: str, location: str, action: str) -> str:
     return "|".join(_normalize(x) for x in (entity, event_type, location, action))
+
+
+# 2026-09-03: реальные посты про атаки не всегда говорят "БПЛА" — та же тревога звучит как
+# "тревога по БЭК" (безэкипажный катер), "Сирена в Новороссийске.", даже просто "В
+# Новороссийске громко." Ловим по всему словарю статус-машины сразу, не только по "бпла"/
+# "беспилот". "бэк" — по границе слова, иначе ловит "камбэк" и подобные.
+_BEK_RE = re.compile(r"\bбэк\b")
+ALERT_CASCADE_KEYWORDS = (
+    "бпла", "беспилот", "сирена", "тревог", "атак", "угроз", "отмена сигнала", "опасност", "🅰",
+)
+
+
+def _is_alert_cascade_text(text: str) -> bool:
+    lowered = text.lower()
+    if any(kw in lowered for kw in ALERT_CASCADE_KEYWORDS):
+        return True
+    return bool(_BEK_RE.search(lowered))
+
+
+# БПЛА/БЭК-тревоги часто приходят как короткие "сиренные" посты — LLM не может извлечь из
+# них entity, а без entity _event_key() возвращал None, и весь дедуп (включая статус-машину
+# чуть ниже) просто не запускался. Итог (владелец, 2026-09-02, затем 2026-09-03): одна и та
+# же тревога от chpnvrsk_official и nvrskadm выходила отдельными постами с разницей в
+# секунды — за одну ночь 6 постов за ~80 секунд. Ключ по району — детерминированный, не
+# зависит от LLM, тот же принцип, что уже используется для выбора фото БПЛА (см.
+# _bpla_photo_for в news.py).
+def _alert_event_key(text: str) -> str:
+    lowered = text.lower()
+    matched = [d for d in BPLA_KRAI_DISTRICTS if d in lowered]
+    if len(matched) == 1:
+        location = matched[0]
+    elif matched:
+        location = "край"  # несколько районов сразу — общая тревога по краю
+    else:
+        location = "новороссийск"  # район явно не назван — считаем нашим по умолчанию
+    return f"бпла|local_alert|{location}|тревога"
 
 
 def _pre_filter_hard_drop(text: str) -> str | None:
@@ -285,7 +343,13 @@ def _classify(rubric: str, channel: str, item: RawItem) -> dict | None:
         f"Заголовок источника: {item.title}\nТекст источника:\n{item.text}"
     )
     try:
-        raw = call_yandexgpt(DIGEST_CLASSIFY_SYSTEM_PROMPT, user_content, max_tokens=CLASSIFY_MAX_TOKENS)
+        # Lite-модель (2026-09-02): классификация не пересказывает текст, только оценивает его
+        # по структурированной схеме — нюанс формулировок здесь не нужен, а зовём её на
+        # порядок чаще, чем _rewrite(), так что модель тут и определяет основной счёт.
+        raw = call_yandexgpt(
+            DIGEST_CLASSIFY_SYSTEM_PROMPT, user_content,
+            max_tokens=CLASSIFY_MAX_TOKENS, model=YANDEX_MODEL_LITE,
+        )
         data = extract_json(raw)
     except Exception as e:
         print(f"[digest_engine] классификация не удалась для @{channel}: {e}")
@@ -372,8 +436,26 @@ def _handle_classification_failure(rubric: str, channel: str, item: RawItem) -> 
     """Классификация целиком отказала (обычно — фильтр безопасности модели, см. комментарий
     у места вызова) на алертном канале — LLM здесь больше не участвует вообще, чтобы не
     отказать повторно: фото — та же логика, что и в обычном пути (danger-фото по ключевым
-    словам в исходном тексте, затем YandexART-фоллбэк), текст — исходный, без пересказа."""
-    matched = _danger_photo_for(f"{item.title} {item.text}")
+    словам в исходном тексте, затем YandexART-фоллбэк), текст — исходный, без пересказа.
+
+    Дедуп (владелец, 2026-09-03): этот путь оказался ОСНОВНЫМ для атак БПЛА/БЭК, не
+    запасным — модель отказывается обсуждать их почти всегда, а не изредка. Раньше дедупа
+    тут не было вообще: за одну ночь 6 постов с двух каналов про одну и ту же атаку ушли
+    за ~80 секунд отдельными карточками. Та же статус-машина, что и в обычном пути (см.
+    комментарий у _alert_event_key), по детерминированному ключу, не зависящему от LLM."""
+    combined_text = f"{item.title} {item.text}"
+    event_key = None
+    if _is_alert_cascade_text(combined_text):
+        event_key = _alert_event_key(combined_text)
+        existing = get_event(event_key)
+        new_status = _bpla_status_from_text(combined_text) or "THREAT"
+        if existing is not None and existing["status"] == new_status:
+            print(f"[digest_engine] дроп @{channel}: повтор тревоги, статус не изменился (event_key={event_key})")
+            _cleanup_item_images(item)
+            return
+        upsert_event(event_key, "LOCAL_ALERT", new_status, item.title, channel)
+
+    matched = _danger_photo_for(combined_text)
     if matched:
         _cleanup_item_images(item)
         item.image_paths = matched
@@ -382,7 +464,7 @@ def _handle_classification_failure(rubric: str, channel: str, item: RawItem) -> 
     candidate_id = insert_candidate(
         source_channel=channel, rubric=rubric, raw_title=item.title, raw_text=item.text,
         url=item.url, image_paths=item.image_paths, primary_type="LOCAL_ALERT",
-        event_key=None, title=item.title, body=item.text,
+        event_key=event_key, title=item.title, body=item.text,
         concerns=["⚠ не удалось обработать автоматически (вероятно, отказ модели) — прислано как есть"],
         needs_manual_review=True, route="NOW", status="scored",
     )
@@ -401,6 +483,96 @@ def _handle_classification_failure(rubric: str, channel: str, item: RawItem) -> 
     update_candidate_status(candidate_id, "sent_moderation", digest_slot="now")
 
 
+def _handle_fuel_topic(rubric: str, channel: str, item: RawItem) -> None:
+    """Тема бензина/топлива (см. FUEL_TOPIC_KEYWORDS в content/news.py) — модель систематически
+    отказывается её пересказывать, поэтому вообще не идём к LLM: фиксированная иллюстрация +
+    исходный текст без ссылок (владелец, 2026-09-02), на решение владельца как алерт.
+
+    В окне FUEL_WINDOW_START_HOUR–FUEL_WINDOW_END_HOUR (МСК) карточка не шлётся сразу —
+    только копится в БД (route=FUEL_WINDOW), т.к. именно в это время несколько источников
+    подряд пишут по сути один и тот же статус АЗС (владелец, 2026-09-04). Отбор и отправка
+    единственной карточки — см. flush_fuel_window."""
+    item.text = _strip_links(item.text)
+    matched = _fuel_photo()
+    if matched:
+        _cleanup_item_images(item)
+        item.image_paths = matched
+    item.image_paths = _ensure_image(rubric, item.title, item.text, item.image_paths)
+
+    concerns = ["⚠ тема бензина — рерайт через YandexGPT пропущен намеренно, показан исходный текст"]
+    now_msk = datetime.now(FUEL_WINDOW_TZ)
+    in_window = FUEL_WINDOW_START_HOUR <= now_msk.hour < FUEL_WINDOW_END_HOUR
+
+    candidate_id = insert_candidate(
+        source_channel=channel, rubric=rubric, raw_title=item.title, raw_text=item.text,
+        url=item.url, image_paths=item.image_paths, primary_type="FUEL_TOPIC",
+        event_key=None, title=item.title, body=item.text,
+        concerns=concerns, needs_manual_review=True,
+        route="FUEL_WINDOW" if in_window else "NOW", status="scored",
+    )
+    if in_window:
+        return  # ждём flush_fuel_window — не шлём карточку сразу
+
+    from moderation import ModerationBot  # локальный импорт — как и в остальных вызовах здесь
+    bot = ModerationBot()
+    if not (bot.token and bot.owner_chat_id):
+        return
+    draft = Draft(
+        rubric=rubric, source_name=item.source_label, source_url=item.url,
+        original_title=item.title, original_text=item.text,
+        title=item.title, body=item.text,
+        concerns=concerns, needs_manual_review=True,
+        image_paths=item.image_paths, candidate_ids=[candidate_id],
+    )
+    bot.send_draft(draft)
+    update_candidate_status(candidate_id, "sent_moderation", digest_slot="now")
+
+
+def _fuel_informativeness(text: str) -> int:
+    """Грубая эвристика «насколько содержателен пост» — без LLM: тема бензина намеренно
+    в обход YandexGPT (см. _handle_fuel_topic), рискованно гонять через модель даже
+    сравнение вариантов. Длина текста + бонус за цифры (адреса, литры, цены — конкретика
+    весомее общих фраз)."""
+    digit_count = sum(ch.isdigit() for ch in text)
+    return len(text) + digit_count * 10
+
+
+def flush_fuel_window() -> None:
+    """Выбирает самый содержательный из накопленных за FUEL_WINDOW постов про топливо/АЗС
+    и шлёт только его владельцу, остальные помечает dropped (владелец, 2026-09-04). Вызывается
+    и по крону в scheduler.py сразу после закрытия окна, и опportunistически в конце каждого
+    collect_candidates — идемпотентно (после первого успешного flush строк route=FUEL_WINDOW/
+    status=scored для сегодняшнего окна больше не остаётся, повторный вызов просто ничего не находит)."""
+    now_msk = datetime.now(FUEL_WINDOW_TZ)
+    if now_msk.hour < FUEL_WINDOW_END_HOUR:
+        return  # окно ещё не закрылось — рано выбирать
+
+    candidates = fetch_candidates(route="FUEL_WINDOW", status="scored")
+    if not candidates:
+        return
+
+    best = max(candidates, key=lambda c: _fuel_informativeness(c.get("body") or c.get("raw_text") or ""))
+    for c in candidates:
+        if c["id"] != best["id"]:
+            update_candidate_status(c["id"], "dropped")
+
+    from moderation import ModerationBot  # локальный импорт — как и в остальных вызовах здесь
+    bot = ModerationBot()
+    if not (bot.token and bot.owner_chat_id):
+        return
+    draft = Draft(
+        rubric=best["rubric"], source_name=f"@{best['source_channel']}", source_url=best.get("url", ""),
+        original_title=best.get("raw_title", ""), original_text=best.get("raw_text", ""),
+        title=best["title"], body=best["body"],
+        concerns=best.get("concerns") or [], needs_manual_review=True,
+        image_paths=best.get("image_paths") or [], candidate_ids=[best["id"]],
+    )
+    bot.send_draft(draft)
+    update_candidate_status(best["id"], "sent_moderation", digest_slot="now")
+    print(f"[digest_engine] тема бензина: выбрал 1 из {len(candidates)} постов за окно "
+          f"{FUEL_WINDOW_START_HOUR}:00-{FUEL_WINDOW_END_HOUR}:00 МСК (candidate_id={best['id']})")
+
+
 def _process_item(rubric: str, channel: str, item: RawItem) -> None:
     item.text = _strip_channel_footer(item.text)
     if not item.text:
@@ -408,6 +580,10 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
         return
 
     combined_text = f"{item.title} {item.text}"
+
+    if _is_fuel_topic(combined_text):
+        _handle_fuel_topic(rubric, channel, item)
+        return
 
     # Юмор — отдельный silo (раздел 17), вне общего скоринга. Pre-filter всё равно
     # применяется (юмористический канал тоже может репостить рекламу).
@@ -464,7 +640,10 @@ def _process_item(rubric: str, channel: str, item: RawItem) -> None:
 
     entity, event_type = data.get("entity", ""), data.get("event_type", data["primary_type"])
     location, action = data.get("location", ""), data.get("action", "")
-    event_key = _event_key(entity, event_type, location, action) if entity else None
+    if data["primary_type"] == "LOCAL_ALERT" and _is_alert_cascade_text(combined_text):
+        event_key = _alert_event_key(combined_text)  # детерминированный — не зависит от entity
+    else:
+        event_key = _event_key(entity, event_type, location, action) if entity else None
 
     if data["primary_type"] in CINEMA_PRIMARY_TYPES and entity:
         # настоящий постер вместо случайного фото источника (скриншот, кадр, обложка
@@ -670,4 +849,6 @@ def collect_candidates(fast_only: bool = False) -> None:
             except Exception as e:
                 print(f"[digest_engine] ошибка обработки поста @{channel}: {e}")
 
+    flush_fuel_window()  # подстраховка на случай, если крон-задание в scheduler.py не отработало —
+    # см. flush_fuel_window: до закрытия окна и без накопленных постов это просто no-op.
     HEARTBEAT_FILE.write_text(datetime.now().isoformat())
