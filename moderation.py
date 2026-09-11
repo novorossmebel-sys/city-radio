@@ -410,6 +410,8 @@ class ModerationBot:
             self.send_draft(draft)
         except Exception as e:
             print(f"[moderation] очередь {queue_id}: не смог отправить следующую карточку: {e}")
+            for cid in item["candidate_ids"]:
+                update_candidate_status(cid, "dropped")
             self._track_for_cleanup(self.owner_chat_id, self._send_text(
                 self.owner_chat_id,
                 f"⚠ Очередь дайджеста: следующую карточку не удалось отправить ({e}).",
