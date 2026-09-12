@@ -211,6 +211,15 @@ def _candidate_from_row(row: sqlite3.Row) -> dict:
     return d
 
 
+def get_candidate(candidate_id: int) -> dict | None:
+    """Один кандидат по id — нужен там, где известен только candidate_id (например,
+    moderation.py::_sweep_stale_decisions решает, авто-отклонять ли карточку, по route
+    самого кандидата, а не по данным самого Draft, где route не хранится)."""
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM candidates WHERE id = ?", (candidate_id,)).fetchone()
+    return _candidate_from_row(row) if row is not None else None
+
+
 def fetch_candidates(route: str | None = None, status: str | None = None) -> list[dict]:
     """Более общий запрос, чем fetch_pool — без исключений по статусу (нужен, например,
     чтобы найти конкретно кандидата в статусе queued_evening для юмористического слота)."""

@@ -16,7 +16,9 @@
 
 Карточка, на которую владелец не отреагировал дольше DECISION_CARD_AUTO_REJECT_SECONDS,
 отклоняется автоматически (см. _sweep_stale_decisions) — тем же путём, что и ручное
-«Отклонить», но без авто-подбора следующего поста той же рубрики.
+«Отклонить», но без авто-подбора следующего поста той же рубрики. Тревоги (route=NOW —
+БПЛА/БЭК/ЧС и т.п., см. _is_alert_draft) из этого правила исключены полностью (владелец,
+2026-09-12) — пропущенная тревога опаснее, чем зависшая в чате карточка.
 
 Повторное нажатие approve/edit, пока бот занят обработкой первого нажатия (см. ниже про
 блокирующий однопоточный polling), игнорируется в течение ACTION_DEBOUNCE_SECONDS —
@@ -552,16 +554,35 @@ class ModerationBot:
             self._removed_auto_delete_keys.add(key)
         self._save_state()
 
+    def _is_alert_draft(self, draft: Draft) -> bool:
+        """route=NOW значит «требует немедленной реакции читателя прямо сейчас» по всей
+        архитектуре дайджест-движка (БПЛА/ЧС и т.п., см. content/digest_engine.py::
+        _route_for) — такие карточки не должны исчезать сами по себе (владелец, 2026-09-12,
+        после того как 80 карточек за неделю авто-отклонились раньше, чем он успел
+        отреагировать, включая часть настоящих БПЛА/БЭК-тревог)."""
+        if not draft.candidate_ids:
+            return False
+        from content.digest_store import get_candidate
+        return any(
+            candidate is not None and candidate["route"] == "NOW"
+            for candidate in (get_candidate(cid) for cid in draft.candidate_ids)
+        )
+
     def _sweep_stale_decisions(self) -> None:
         """Автоматически отклоняет карточки-решения, на которые владелец не отреагировал
         дольше DECISION_CARD_AUTO_REJECT_SECONDS — см. константу. Тем же путём, что и
         ручной reject (удаление карточки/фото-превью, cleanup картинок, статус candidate
         → dropped, продвижение очереди дайджеста), но БЕЗ _handle_reject_followup: раз
-        владелец не отвечает часами, не стоит присылать ему ещё материал по той же рубрике."""
+        владелец не отвечает часами, не стоит присылать ему ещё материал по той же рубрике.
+
+        Тревоги (route=NOW, см. _is_alert_draft) полностью исключены из этого правила —
+        для них тайм-аута нет вообще, ждём решения сколько угодно."""
         now = time.time()
         stale_ids = [
             draft_id for draft_id, sent_at in self._pending_sent_at.items()
-            if draft_id in self.pending and now - sent_at >= DECISION_CARD_AUTO_REJECT_SECONDS
+            if draft_id in self.pending
+            and now - sent_at >= DECISION_CARD_AUTO_REJECT_SECONDS
+            and not self._is_alert_draft(self.pending[draft_id])
         ]
         if not stale_ids:
             return
