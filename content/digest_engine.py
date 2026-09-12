@@ -13,7 +13,7 @@
 import random
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -59,6 +59,18 @@ FUEL_WINDOW_END_HOUR = 10    # разных источников за этот �
 # статус, пересказанный несколько раз. Вместо карточки на каждый пост — копим в этом
 # окне (см. _handle_fuel_topic) и в конце шлём только самый содержательный (см.
 # flush_fuel_window). Вне окна — старое поведение, карточка сразу.
+
+# Владелец, 2026-09-12: пулы DIGEST/WEEKLY/HUMOR_POOL сами по себе никак не учитывают
+# возраст кандидата — fetch_pool()/fetch_candidates() только сортируют по score, поэтому
+# невыбранный кандидат остаётся в статусе scored бессрочно и продолжает конкурировать со
+# свежими постами наравне хоть месяц спустя ("у нас не новостной канал, а старости").
+# Значения — по смыслу самого выпуска: DIGEST/HUMOR_POOL живут циклом в сутки, WEEKLY —
+# неделей (с запасом в день, чтобы не терять кандидата, оценённого в четверг вечером).
+POOL_MAX_AGE_HOURS = {
+    "DIGEST": 48,
+    "WEEKLY": 24 * 8,
+    "HUMOR_POOL": 48,
+}
 
 PRIMARY_TYPES = (
     "LOCAL_ALERT", "LOCAL_STATUS", "LOCAL_UTILITY", "LOCAL_EVENT",
@@ -573,6 +585,35 @@ def flush_fuel_window() -> None:
           f"{FUEL_WINDOW_START_HOUR}:00-{FUEL_WINDOW_END_HOUR}:00 МСК (candidate_id={best['id']})")
 
 
+def expire_stale_pool_candidates() -> None:
+    """Помечает dropped всё, что засиделось в DIGEST/WEEKLY/HUMOR_POOL дольше своего
+    POOL_MAX_AGE_HOURS и так и не было выбрано ни одним compose_*/select_humor —
+    без этого старый кандидат никогда не выбывает из гонки и может годами конкурировать
+    со свежими постами (см. комментарий у POOL_MAX_AGE_HOURS). Тот же путь очистки, что и
+    у непобедивших кандидатов в flush_fuel_window: статус dropped + удаление скачанных
+    файлов (без этого media_cache/ тоже рос бы бессрочно для картинок, которые уже никто
+    не покажет). Идемпотентно и дёшево (без LLM) — безопасно дёргать на каждом
+    collect_candidates, как и flush_fuel_window."""
+    now = datetime.now()
+    for route, max_age_hours in POOL_MAX_AGE_HOURS.items():
+        cutoff = now - timedelta(hours=max_age_hours)
+        stale = [
+            c for c in fetch_candidates(route=route, status="scored")
+            if datetime.fromisoformat(c["fetched_at"]) < cutoff
+        ]
+        if not stale:
+            continue
+        for c in stale:
+            for path in (c.get("image_paths") or []):
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except Exception as e:
+                    print(f"[digest_engine] не смог удалить {path}: {e}")
+            update_candidate_status(c["id"], "dropped")
+        print(f"[digest_engine] пул {route}: устарело и убрано {len(stale)} "
+              f"кандидат(ов) старше {max_age_hours}ч")
+
+
 def _process_item(rubric: str, channel: str, item: RawItem) -> None:
     item.text = _strip_channel_footer(item.text)
     if not item.text:
@@ -851,4 +892,7 @@ def collect_candidates(fast_only: bool = False) -> None:
 
     flush_fuel_window()  # подстраховка на случай, если крон-задание в scheduler.py не отработало —
     # см. flush_fuel_window: до закрытия окна и без накопленных постов это просто no-op.
+    expire_stale_pool_candidates()  # см. POOL_MAX_AGE_HOURS — чистит зависшие DIGEST/WEEKLY/
+    # HUMOR_POOL пулы от кандидатов, которые никогда не выберут, но которые иначе продолжали
+    # бы бессрочно конкурировать со свежими постами.
     HEARTBEAT_FILE.write_text(datetime.now().isoformat())
