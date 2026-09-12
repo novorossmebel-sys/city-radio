@@ -15,13 +15,14 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import yaml
 
 from content.base import Draft
 from content.digest_store import (
     get_cursor, set_cursor, insert_candidate, update_candidate_status, update_candidate_content,
-    get_event, upsert_event, is_in_cooldown, mark_event_published,
+    get_event, upsert_event, is_in_cooldown, mark_event_published, fetch_candidates,
 )
 from content.llm import call_yandexgpt, extract_json, YANDEX_MODEL_LITE
 from content.news import (
@@ -51,6 +52,13 @@ NORMAL_POLL_LIMIT = 5
 # отпустило: content/digest_store.py's WAL-фикс от 2026-08-19 лечит конкурентную запись,
 # это отдельная история про подвисший event loop).
 HEARTBEAT_FILE = Path("scheduler_heartbeat.txt")
+
+FUEL_WINDOW_TZ = ZoneInfo("Europe/Moscow")
+FUEL_WINDOW_START_HOUR = 9   # владелец, 2026-09-04: утренние посты про топливо/АЗС от
+FUEL_WINDOW_END_HOUR = 10    # разных источников за этот час — по сути один и тот же
+# статус, пересказанный несколько раз. Вместо карточки на каждый пост — копим в этом
+# окне (см. _handle_fuel_topic) и в конце шлём только самый содержательный (см.
+# flush_fuel_window). Вне окна — старое поведение, карточка сразу.
 
 PRIMARY_TYPES = (
     "LOCAL_ALERT", "LOCAL_STATUS", "LOCAL_UTILITY", "LOCAL_EVENT",
@@ -478,7 +486,12 @@ def _handle_classification_failure(rubric: str, channel: str, item: RawItem) -> 
 def _handle_fuel_topic(rubric: str, channel: str, item: RawItem) -> None:
     """Тема бензина/топлива (см. FUEL_TOPIC_KEYWORDS в content/news.py) — модель систематически
     отказывается её пересказывать, поэтому вообще не идём к LLM: фиксированная иллюстрация +
-    исходный текст без ссылок (владелец, 2026-09-02), сразу на решение владельца как алерт."""
+    исходный текст без ссылок (владелец, 2026-09-02), на решение владельца как алерт.
+
+    В окне FUEL_WINDOW_START_HOUR–FUEL_WINDOW_END_HOUR (МСК) карточка не шлётся сразу —
+    только копится в БД (route=FUEL_WINDOW), т.к. именно в это время несколько источников
+    подряд пишут по сути один и тот же статус АЗС (владелец, 2026-09-04). Отбор и отправка
+    единственной карточки — см. flush_fuel_window."""
     item.text = _strip_links(item.text)
     matched = _fuel_photo()
     if matched:
@@ -487,12 +500,19 @@ def _handle_fuel_topic(rubric: str, channel: str, item: RawItem) -> None:
     item.image_paths = _ensure_image(rubric, item.title, item.text, item.image_paths)
 
     concerns = ["⚠ тема бензина — рерайт через YandexGPT пропущен намеренно, показан исходный текст"]
+    now_msk = datetime.now(FUEL_WINDOW_TZ)
+    in_window = FUEL_WINDOW_START_HOUR <= now_msk.hour < FUEL_WINDOW_END_HOUR
+
     candidate_id = insert_candidate(
         source_channel=channel, rubric=rubric, raw_title=item.title, raw_text=item.text,
         url=item.url, image_paths=item.image_paths, primary_type="FUEL_TOPIC",
         event_key=None, title=item.title, body=item.text,
-        concerns=concerns, needs_manual_review=True, route="NOW", status="scored",
+        concerns=concerns, needs_manual_review=True,
+        route="FUEL_WINDOW" if in_window else "NOW", status="scored",
     )
+    if in_window:
+        return  # ждём flush_fuel_window — не шлём карточку сразу
+
     from moderation import ModerationBot  # локальный импорт — как и в остальных вызовах здесь
     bot = ModerationBot()
     if not (bot.token and bot.owner_chat_id):
@@ -506,6 +526,51 @@ def _handle_fuel_topic(rubric: str, channel: str, item: RawItem) -> None:
     )
     bot.send_draft(draft)
     update_candidate_status(candidate_id, "sent_moderation", digest_slot="now")
+
+
+def _fuel_informativeness(text: str) -> int:
+    """Грубая эвристика «насколько содержателен пост» — без LLM: тема бензина намеренно
+    в обход YandexGPT (см. _handle_fuel_topic), рискованно гонять через модель даже
+    сравнение вариантов. Длина текста + бонус за цифры (адреса, литры, цены — конкретика
+    весомее общих фраз)."""
+    digit_count = sum(ch.isdigit() for ch in text)
+    return len(text) + digit_count * 10
+
+
+def flush_fuel_window() -> None:
+    """Выбирает самый содержательный из накопленных за FUEL_WINDOW постов про топливо/АЗС
+    и шлёт только его владельцу, остальные помечает dropped (владелец, 2026-09-04). Вызывается
+    и по крону в scheduler.py сразу после закрытия окна, и опportunistически в конце каждого
+    collect_candidates — идемпотентно (после первого успешного flush строк route=FUEL_WINDOW/
+    status=scored для сегодняшнего окна больше не остаётся, повторный вызов просто ничего не находит)."""
+    now_msk = datetime.now(FUEL_WINDOW_TZ)
+    if now_msk.hour < FUEL_WINDOW_END_HOUR:
+        return  # окно ещё не закрылось — рано выбирать
+
+    candidates = fetch_candidates(route="FUEL_WINDOW", status="scored")
+    if not candidates:
+        return
+
+    best = max(candidates, key=lambda c: _fuel_informativeness(c.get("body") or c.get("raw_text") or ""))
+    for c in candidates:
+        if c["id"] != best["id"]:
+            update_candidate_status(c["id"], "dropped")
+
+    from moderation import ModerationBot  # локальный импорт — как и в остальных вызовах здесь
+    bot = ModerationBot()
+    if not (bot.token and bot.owner_chat_id):
+        return
+    draft = Draft(
+        rubric=best["rubric"], source_name=f"@{best['source_channel']}", source_url=best.get("url", ""),
+        original_title=best.get("raw_title", ""), original_text=best.get("raw_text", ""),
+        title=best["title"], body=best["body"],
+        concerns=best.get("concerns") or [], needs_manual_review=True,
+        image_paths=best.get("image_paths") or [], candidate_ids=[best["id"]],
+    )
+    bot.send_draft(draft)
+    update_candidate_status(best["id"], "sent_moderation", digest_slot="now")
+    print(f"[digest_engine] тема бензина: выбрал 1 из {len(candidates)} постов за окно "
+          f"{FUEL_WINDOW_START_HOUR}:00-{FUEL_WINDOW_END_HOUR}:00 МСК (candidate_id={best['id']})")
 
 
 def _process_item(rubric: str, channel: str, item: RawItem) -> None:
@@ -784,4 +849,6 @@ def collect_candidates(fast_only: bool = False) -> None:
             except Exception as e:
                 print(f"[digest_engine] ошибка обработки поста @{channel}: {e}")
 
+    flush_fuel_window()  # подстраховка на случай, если крон-задание в scheduler.py не отработало —
+    # см. flush_fuel_window: до закрытия окна и без накопленных постов это просто no-op.
     HEARTBEAT_FILE.write_text(datetime.now().isoformat())
